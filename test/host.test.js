@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -161,7 +161,6 @@ async function stream(ctx, provider, chunks) {
   const original = (async function* () { yield* chunks; })();
   let nextCalls = 0;
   const output = handlers[0]({ provider }, () => { nextCalls++; return original; });
-  if (!/qwen|token-plan|qianwen/i.test(provider)) assert.equal(output, original);
   const received = [];
   for await (const chunk of output) received.push(chunk);
   assert.equal(nextCalls, 1);
@@ -244,7 +243,7 @@ test("Qwen streams pass chunks through, persist local usage, reload, and reset",
   assert.equal(snapshot.status, "local");
   assert.equal(new URL(snapshot.link).hostname, "platform.qianwenai.com");
   assert.deepEqual({ ...snapshot.usage, since: null }, {
-    input: 14, output: 5, total: 19, cacheRead: 2, cacheWrite: 1, requests: 2, since: null,
+    input: 10, output: 3, total: 13, cacheRead: 2, cacheWrite: 1, requests: 1, since: null,
   });
   assert.ok(snapshot.usage.since > 0);
   for (const timer of intervals.values()) timer.callback();
@@ -257,12 +256,122 @@ test("Qwen streams pass chunks through, persist local usage, reload, and reset",
   ctx.dispose();
   const reloaded = boot();
   await flush();
-  assert.equal(reloaded.registry.list()[0].snapshot.usage.total, 19);
+  assert.equal(reloaded.registry.list()[0].snapshot.usage.total, 13);
   const reset = await request(reloaded, "/usage/reset", { method: "POST" });
   assert.equal(reset.status, 200);
   await flush();
   assert.deepEqual(JSON.parse(readFileSync(usagePath, "utf8")), {});
   assert.equal(reloaded.registry.list()[0].snapshot.usage, null);
+});
+
+test("Qwen aliases, native routes and multiple configurations stay independent and live", async (t) => {
+  const { ctx, state } = await harness(t, {
+    providers: ["qwen-native"],
+    config: { work: { baseURL: "https://coding.dashscope.aliyuncs.com/v1" }, qwen: {} },
+  });
+  await stream(ctx, "work", [{ type: "usage", usage: { inputTokens: 5, outputTokens: 3, cacheReadTokens: 7, cacheWriteTokens: 2 } }]);
+  await stream(ctx, "qwen", [{ type: "usage", usage: { totalTokens: 4 } }]);
+  await stream(ctx, "qwen-native", [{ type: "usage", usage: { totalTokens: 9 } }]);
+  const rows = (await request(ctx, "/list")).body.value.sources;
+  assert.equal(rows.find((s) => s.id === "provider:work").snapshot.usage.total, 17);
+  assert.equal(rows.find((s) => s.id === "provider:qwen").snapshot.usage.total, 4);
+  assert.equal(rows.find((s) => s.id === "provider:qwen-native").snapshot.usage.total, 9);
+  state.config.work = { baseURL: "https://ordinary.invalid/v1", displayName: "Changed" };
+  ctx.emit("llm/adapters-updated");
+  await ctx.registry.refresh();
+  const changed = ctx.registry.list().find((s) => s.id === "provider:work");
+  assert.equal(changed.label, "Changed");
+  assert.equal(changed.snapshot.status, "unsupported");
+});
+
+test("cumulative reports count once, invalid reports are sanitized and no-usage calls are excluded", async (t) => {
+  const { ctx } = await harness(t, { config: { qwen: {} } });
+  await stream(ctx, "qwen", [
+    { type: "usage", usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } },
+    { type: "usage", usage: { inputTokens: 2, outputTokens: 4, totalTokens: 6 } },
+    { type: "usage", usage: { totalTokens: NaN } },
+  ]);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.total, 6);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.requests, 1);
+  await stream(ctx, "qwen", [{ type: "text", text: "no usage" }]);
+  await stream(ctx, "qwen", [{ type: "usage", usage: {} }]);
+  await stream(ctx, "qwen", [{ type: "usage", usage: { inputTokens: -1, outputTokens: Infinity } }]);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.requests, 1);
+  await stream(ctx, "qwen", [{ type: "usage", usage: { inputTokens: -4, outputTokens: 2, cacheReadTokens: Infinity } }]);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.total, 8);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.input, 2);
+});
+
+test("stream errors and cancellation propagate and finalize only reported usage", async (t) => {
+  const { ctx } = await harness(t, { config: { qwen: {} } });
+  const observe = [...ctx.listeners.get("llm/stream")][0];
+  const failure = new Error("upstream failure");
+  const original = (async function* () { yield { type: "usage", usage: { totalTokens: 3 } }; throw failure; })();
+  await assert.rejects(async () => { for await (const chunk of observe({ provider: "qwen" }, () => original)) void chunk; }, (err) => err === failure);
+  let closed = false;
+  const cancelled = observe({ provider: "qwen" }, () => (async function* () {
+    try { yield { type: "usage", usage: { totalTokens: 2 } }; yield { type: "text", text: "rest" }; }
+    finally { closed = true; }
+  })());
+  await cancelled.next();
+  await cancelled.return();
+  assert.equal(closed, true);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.total, 5);
+  assert.equal(ctx.registry.list()[0].snapshot.usage.requests, 2);
+});
+
+test("reset, pause and disposal invalidate in-flight usage without blocking streams", async (t) => {
+  const { ctx } = await harness(t, { config: { qwen: {} } });
+  const observe = [...ctx.listeners.get("llm/stream")][0];
+  const start = async () => {
+    const iterator = observe({ provider: "qwen" }, () => (async function* () { yield { type: "usage", usage: { totalTokens: 100 } }; })());
+    await iterator.next();
+    return iterator;
+  };
+  const beforeReset = await start();
+  await request(ctx, "/usage/reset", { method: "POST" });
+  await beforeReset.next();
+  assert.equal(ctx.registry.list()[0].snapshot.usage, null);
+  await stream(ctx, "qwen", [{ type: "usage", usage: { totalTokens: 7 } }]);
+  const beforePause = await start();
+  await request(ctx, "/prefs", { method: "POST", body: { trackUsage: false } });
+  assert.equal(ctx.registry.list()[0].snapshot.tracking, false);
+  const whilePaused = await start();
+  await request(ctx, "/prefs", { method: "POST", body: { trackUsage: true } });
+  await beforePause.next();
+  await whilePaused.next();
+  assert.equal(ctx.registry.list()[0].snapshot.usage.total, 7);
+  const beforeDispose = await start();
+  ctx.dispose();
+  await beforeDispose.next();
+});
+
+test("invalid stored counters are sanitized and failed writes retry without breaking generation", async (t) => {
+  const { ctx, home, boot, intervals } = await harness(t, { config: { qwen: {} } });
+  ctx.dispose();
+  const directory = join(home, "plugins", "provider-quota");
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, "usage.json");
+  writeFileSync(path, JSON.stringify({ qwen: { requests: 1, input: -5, output: "bad", total: 9, cacheRead: null }, broken: null }));
+  const reloaded = boot();
+  await flush();
+  assert.equal(reloaded.registry.list()[0].snapshot.usage.input, 0);
+  assert.equal(reloaded.registry.list()[0].snapshot.usage.output, 0);
+  const temporary = join(directory, "usage.json.tmp");
+  mkdirSync(temporary);
+  await stream(reloaded, "qwen", [{ type: "usage", usage: { totalTokens: 4 } }]);
+  assert.equal(reloaded.registry.list()[0].snapshot.usage.total, 13);
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).qwen.total, 9);
+  assert.equal(resolve(temporary), join(resolve(home), "plugins", "provider-quota", "usage.json.tmp"));
+  rmdirSync(temporary); // Exact empty directory made above, not user data.
+  for (const timer of intervals.values()) timer.callback();
+  assert.equal(JSON.parse(readFileSync(path, "utf8")).qwen.total, 13);
+  mkdirSync(temporary);
+  assert.equal((await request(reloaded, "/usage/reset", { method: "POST" })).status, 500);
+  assert.equal(resolve(temporary), join(resolve(home), "plugins", "provider-quota", "usage.json.tmp"));
+  rmdirSync(temporary);
+  for (const timer of intervals.values()) timer.callback();
+  assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {});
 });
 
 test("preferences clamp refresh interval, persist, and toggle owned sources and usage", async (t) => {

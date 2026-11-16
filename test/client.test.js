@@ -19,6 +19,9 @@ function client(t, options = {}) {
   const requests = [];
   const rpcCalls = [];
   const styles = [];
+  const confirmations = [];
+  const dispatched = [];
+  let dictionaries;
   const state = {
     prefs: { refreshSeconds: options.refreshSeconds ?? 17, hidden: {} },
     sources: options.sources ?? [{ id: "plugin:subscriptions:codex", label: "Codex", snapshot: { status: "client-fetch", provider: "codex" } }],
@@ -58,7 +61,8 @@ function client(t, options = {}) {
       events.get(event).add(handler);
     },
     removeEventListener(event, handler) { events.get(event)?.delete(handler); },
-    dispatchEvent(event) { for (const handler of events.get(event.type) ?? []) handler(event); },
+    dispatchEvent(event) { dispatched.push(event.type); for (const handler of events.get(event.type) ?? []) handler(event); },
+    confirm(message) { confirmations.push(message); return options.confirm ? options.confirm(message) : true; },
   };
   const document = {
     querySelector() { return null; },
@@ -75,6 +79,10 @@ function client(t, options = {}) {
     fetch: async (url, init = {}) => {
       requests.push({ url, init });
       assert.ok(["/api/provider-quota/list", "/api/provider-quota/prefs", "/api/provider-quota/refresh", "/api/provider-quota/usage/reset"].includes(url));
+      if (options.fetch) {
+        const response = await options.fetch(url, init, state);
+        if (response) return response;
+      }
       return { ok: true, json: async () => ({ ok: true, value: url.endsWith("/prefs") ? state.prefs : state }) };
     },
   }, { filename: "client.js" });
@@ -85,7 +93,10 @@ function client(t, options = {}) {
   });
   plugin.apply({
     effect(setup) { const dispose = setup(); if (typeof dispose === "function") effects.push(dispose); return dispose; },
-    locale: { register: () => () => {}, bind: () => (key) => key },
+    locale: {
+      register(_namespace, values) { dictionaries = values; return () => {}; },
+      bind: () => (key) => options.locale ? dictionaries[options.locale][key] : key,
+    },
     get: () => ({ rpc: { call: async (...args) => {
       rpcCalls.push(args);
       if (options.rpc) return options.rpc(...args);
@@ -121,7 +132,9 @@ function client(t, options = {}) {
     timeouts.clear();
     slots.clear();
   });
-  return { definition, plugin, slots, mount, render, intervals, requests, rpcCalls, state, styles };
+  return { definition, plugin, slots, mount, render, intervals, requests, rpcCalls, state, styles, confirmations, dispatched,
+    changed: () => window.dispatchEvent({ type: "provider-quota:changed" }),
+  };
 }
 
 function nodes(tree) {
@@ -205,4 +218,212 @@ test("settings reset POST declares JSON and sends a JSON body", async (t) => {
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.headers["content-type"], "application/json");
   assert.deepEqual(JSON.parse(request.init.body), {});
+  assert.deepEqual(app.confirmations, ["resetConfirm"]);
+  assert.deepEqual(app.dispatched, ["provider-quota:changed"]);
+  assert.ok(nodes(app.render()).some((node) => node.props.children.includes("resetSuccess")));
+});
+
+const localSource = (id = "qwen", total = 1500, tracking = true) => ({
+  id: `provider:${id}`, label: id,
+  snapshot: { status: "local", link: "https://qianwen.example/console", tracking,
+    usage: { input: 1000, output: 200, total, cacheRead: 250, cacheWrite: 50, requests: 7, since: 1700000000000 } },
+});
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+};
+function rows(app) {
+  const view = panel(app.render());
+  return nodes(view.type(view.props)).filter((node) => node.props.source).map((node) => node.type(node.props));
+}
+function text(tree) { return nodes(tree).flatMap((node) => node.props.children.filter((child) => typeof child === "string")).join(" "); }
+function resetButton(app) { return nodes(app.render()).find((node) => node.type === "button" && node.props.children.includes("reset")); }
+
+test("local rows explicitly show consumed tokens, per-provider totals, full details and console links", async (t) => {
+  for (const locale of ["zh", "en"]) {
+    await t.test(locale, async (t) => {
+      const app = client(t, { locale, sources: [localSource(), localSource("qwen-other", 900)] });
+      app.mount();
+      await flush();
+      const [first, second] = rows(app);
+      assert.match(text(first), locale === "zh" ? /本地已用 1.5K tokens/ : /Locally used 1.5K tokens/);
+      assert.match(text(second), /900 tokens/);
+      const detail = nodes(first).find((node) => node.props.className === "pq-localval");
+      assert.ok(!nodes(first).some((node) => node.props.className === "pq-detail"));
+      assert.doesNotMatch(text(first), /Credits|DSH|缓存|cache|Tracking since/);
+      for (const fragment of locale === "zh" ? ["未缓存输入 1K", "输出 200", "缓存读取 250", "缓存写入 50", "7 次请求（收到 usage）", "统计起始", "2023", "非套餐真实剩余 Credits"] : ["uncached input 1K", "output 200", "cache read 250", "cache write 50", "7 requests with usage", "Tracking since", "2023", "not the plan's real remaining Credits"]) {
+        assert.ok(detail.props.title.includes(fragment), fragment);
+      }
+      assert.match(detail.props.children[0], /1.5K tokens/);
+      const link = nodes(first).find((node) => node.type === "a");
+      assert.equal(link.props.href, "https://qianwen.example/console");
+      assert.equal(link.props.target, "_blank");
+      assert.equal(link.props.rel, "noreferrer");
+      assert.ok(!nodes(first).some((node) => node.props.className === "pq-bar"));
+      assert.equal(app.rpcCalls.length, 0);
+    });
+  }
+});
+
+test("paused tracking retains accumulated tokens and zero usage still has an explicit local label", async (t) => {
+  const empty = localSource("empty", 0, false);
+  empty.snapshot.usage = null;
+  const app = client(t, { locale: "zh", sources: [localSource("paused", 1500, false), empty] });
+  app.mount();
+  await flush();
+  const [paused, none] = rows(app);
+  assert.match(text(paused), /本地已用 1.5K tokens · 统计已暂停/);
+  assert.match(nodes(paused).find((node) => node.props.className === "pq-localval").props.title, /缓存写入 50/);
+  assert.match(text(none), /本地已用 0 tokens · 统计已暂停/);
+  const tooltip = nodes(none).find((node) => node.props.className === "pq-localval").props.title;
+  assert.match(tooltip, /暂无 DSH 用量/);
+  assert.match(tooltip, /非套餐真实剩余 Credits/);
+  assert.doesNotMatch(text(none), /暂无 DSH 用量|Credits/);
+});
+
+test("all provider states share fixed row tracks and local usage is small gray text without an extra hint", async (t) => {
+  const snapshots = [
+    { status: "ok", remaining: "33%", usedPercent: 67, detail: "5h 0% · weekly 67%" },
+    { status: "ok", remaining: "¥55.12" },
+    { status: "loading" }, { status: "unsupported" }, { status: "error", error: "failed" },
+  ];
+  const app = client(t, { sources: [localSource(), ...snapshots.map((snapshot, i) => ({ id: String(i), label: "Provider", snapshot }))] });
+  app.mount();
+  await flush();
+  const rendered = rows(app);
+  assert.equal(rendered.length, 6);
+  for (const row of rendered) {
+    assert.ok(row.props.className.split(" ").includes("pq-row"));
+    assert.equal(nodes(row).filter((node) => node.props.className === "pq-line").length, 1);
+  }
+  const localHeader = nodes(rendered[0]).find((node) => node.props.className === "pq-line");
+  assert.ok(nodes(localHeader).some((node) => node.type === "a"));
+  assert.ok(!nodes(localHeader).some((node) => node.props.className === "pq-localval"));
+  const css = app.styles[0].textContent;
+  assert.match(css, /\.pq-row\{[^}]*grid-template-rows:16px 3px 13px[^}]*height:48px[^}]*flex:0 0 48px/);
+  assert.match(css, /\.pq-line\{grid-row:1;/);
+  assert.match(css, /\.pq-bar\{grid-row:2;/);
+  assert.match(css, /\.pq-detail\{grid-row:3;/);
+  assert.match(css, /\.pq-localval\{grid-row:3;[^}]*font-size:10px;[^}]*color:var\(--dsw-alias-label-tertiary\)[^}]*text-overflow:ellipsis;white-space:nowrap/);
+  assert.doesNotMatch(css, /\.pq-row-local[^}]*flex-wrap:wrap/);
+});
+
+test("cancelled reset neither sends a request nor announces success", async (t) => {
+  const app = client(t, { sources: [], confirm: () => false });
+  app.mount("settings.section");
+  await flush();
+  await resetButton(app).props.onClick();
+  assert.deepEqual(app.confirmations, ["resetConfirm"]);
+  assert.equal(app.requests.filter((r) => r.url.endsWith("/usage/reset")).length, 0);
+  assert.equal(app.dispatched.length, 0);
+  assert.ok(!nodes(app.render()).some((node) => node.props.className?.startsWith("pq-msg")));
+});
+
+test("reset is disabled while pending and repeated clicks issue only one request", async (t) => {
+  const pending = deferred();
+  const app = client(t, { sources: [], fetch: (url) => url.endsWith("/usage/reset") ? pending.promise : undefined });
+  app.mount("settings.section");
+  await flush();
+  const button = resetButton(app);
+  const request = button.props.onClick();
+  await button.props.onClick();
+  const busy = nodes(app.render()).find((node) => node.type === "button" && node.props.children.includes("resetting"));
+  assert.equal(busy.props.disabled, true);
+  assert.equal(busy.props["aria-busy"], true);
+  await busy.props.onClick();
+  assert.equal(app.confirmations.length, 1);
+  assert.equal(app.requests.filter((r) => r.url.endsWith("/usage/reset")).length, 1);
+  pending.resolve({ ok: true, json: async () => ({ ok: true }) });
+  await request;
+  assert.equal(resetButton(app).props.disabled, false);
+  assert.deepEqual(app.dispatched, ["provider-quota:changed"]);
+});
+
+test("HTTP, API, JSON and network reset failures report failure without change events", async (t) => {
+  const failures = {
+    http: () => ({ ok: false, json: async () => ({ ok: true }) }),
+    api: () => ({ ok: true, json: async () => ({ ok: false }) }),
+    json: () => ({ ok: true, json: async () => { throw new Error("invalid JSON"); } }),
+    network: () => { throw new Error("offline"); },
+  };
+  for (const [name, failure] of Object.entries(failures)) {
+    await t.test(name, async (t) => {
+      const app = client(t, { sources: [], fetch: (url) => url.endsWith("/usage/reset") ? failure() : undefined });
+      app.mount("settings.section");
+      await flush();
+      await resetButton(app).props.onClick();
+      const message = nodes(app.render()).find((node) => node.props.className === "pq-msg pq-err");
+      assert.equal(message.props.children[0], "resetFail");
+      assert.equal(app.dispatched.length, 0);
+      assert.equal(resetButton(app).props.disabled, false);
+    });
+  }
+});
+
+test("host local snapshots render before blocked subscription status and usage queries", async (t) => {
+  for (const blocked of ["subscriptions-auth.status", "subscriptions-auth.usage"]) {
+    await t.test(blocked, async (t) => {
+      const pending = deferred();
+      const subscription = { id: "sub", label: "Codex", snapshot: { status: "client-fetch", provider: "codex" } };
+      const providers = { value: { providers: { codex: { accounts: [{ key: "account" }] } } } };
+      const app = client(t, { sources: [localSource(), subscription], rpc: (_path, method) => method === blocked ? pending.promise : providers });
+      app.mount();
+      await flush();
+      const view = panel(app.render());
+      assert.equal(view.props.loading, false);
+      assert.equal(view.props.sources[0].snapshot.usage.total, 1500);
+      assert.equal(view.props.sources[1].snapshot.status, "client-fetch");
+      pending.resolve(blocked.endsWith("status") ? providers : { ok: true, value: { supported: false } });
+      await flush();
+    });
+  }
+});
+
+test("late subscription results cannot overwrite newer local totals or visibility", async (t) => {
+  const pending = deferred();
+  const subscription = { id: "sub", label: "Codex", snapshot: { status: "client-fetch", provider: "codex" } };
+  const app = client(t, { sources: [localSource(), subscription], rpc: (_path, method) => method.endsWith("status")
+    ? { value: { providers: { codex: { accounts: [{ key: "account" }] } } } } : pending.promise });
+  app.mount();
+  await flush();
+  app.state.sources = [localSource("qwen", 0, false)];
+  app.state.prefs.hidden = { sub: true };
+  app.changed();
+  await flush();
+  assert.equal(panel(app.render()).props.sources.length, 1);
+  pending.resolve({ ok: true, value: { supported: true, windows: [{ kind: "weekly", usedPercent: 90 }] } });
+  await flush();
+  const view = panel(app.render());
+  assert.equal(view.props.sources.length, 1);
+  assert.equal(view.props.sources[0].snapshot.usage.total, 0);
+  assert.equal(view.props.sources[0].snapshot.tracking, false);
+});
+
+test("out-of-order host list responses cannot restore stale totals or refresh intervals", async (t) => {
+  const pending = deferred();
+  let lists = 0;
+  const app = client(t, { sources: [localSource("qwen", 0, false)], refreshSeconds: 8,
+    fetch: (url) => url.endsWith("/list") && ++lists === 1 ? pending.promise : undefined });
+  app.mount();
+  app.changed();
+  await flush();
+  pending.resolve({ ok: true, json: async () => ({ ok: true, value: { sources: [localSource()], prefs: { refreshSeconds: 99 } } }) });
+  await flush();
+  const view = panel(app.render());
+  assert.equal(view.props.sources[0].snapshot.usage.total, 0);
+  assert.equal(view.props.sources[0].snapshot.tracking, false);
+  assert.equal([...app.intervals.values()][0].delay, 8000);
+});
+
+test("failed host refresh preserves already displayed local snapshots", async (t) => {
+  let fail = false;
+  const app = client(t, { sources: [localSource()], fetch: (url) => fail && url.endsWith("/list")
+    ? { ok: false, json: async () => ({ ok: false }) } : undefined });
+  app.mount();
+  await flush();
+  fail = true;
+  app.changed();
+  await flush();
+  assert.equal(panel(app.render()).props.sources[0].snapshot.usage.total, 1500);
 });

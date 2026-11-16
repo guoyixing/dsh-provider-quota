@@ -24,9 +24,12 @@ window.__ModuleLoader__.load({
       queryProviders: "DSH 配置的供应商余额",
       visibility: "显示条目", visible: "显示", hidden: "隐藏",
       saved: "已保存", saveFail: "保存失败", noSources: "暂无可配置的条目",
-      requests: "次请求", in: "输入", out: "输出", cache: "缓存", noUsageYet: "暂无 DSH 用量",
+      requests: "次请求（收到 usage）", in: "未缓存输入", out: "输出", cacheRead: "缓存读取", cacheWrite: "缓存写入", noUsageYet: "暂无 DSH 用量",
+      localUsed: "本地已用", paused: "统计已暂停", since: "统计起始", unknownSince: "未知",
       trackUsage: "本地统计千问经 DSH 的用量", usageTitle: "千问本地用量",
       usageDesc: "仅统计经 DSH 的 token 消耗，非套餐真实剩余 Credits。", reset: "重置统计",
+      resetConfirm: "确定重置所有千问供应商的本地累计用量吗？此操作无法撤销，不影响供应商实际额度。",
+      resetting: "重置中…", resetSuccess: "统计已重置", resetFail: "重置失败，请重试",
     };
     const en = {
       title: "Quota", refresh: "Refresh", empty: "No quota data", loading: "Loading…",
@@ -39,9 +42,12 @@ window.__ModuleLoader__.load({
       queryProviders: "DSH-configured provider balances",
       visibility: "Visible items", visible: "Show", hidden: "Hide",
       saved: "Saved", saveFail: "Save failed", noSources: "No configurable items",
-      requests: "requests", in: "in", out: "out", cache: "cache", noUsageYet: "No DSH usage yet",
+      requests: "requests with usage", in: "uncached input", out: "output", cacheRead: "cache read", cacheWrite: "cache write", noUsageYet: "No DSH usage yet",
+      localUsed: "Locally used", paused: "Tracking paused", since: "Tracking since", unknownSince: "Unknown",
       trackUsage: "Track Qwen usage through DSH locally", usageTitle: "Qwen local usage",
       usageDesc: "Counts DSH token traffic only, not the plan's real remaining Credits.", reset: "Reset stats",
+      resetConfirm: "Reset local usage totals for all Qwen providers? This cannot be undone and does not affect actual provider quota.",
+      resetting: "Resetting…", resetSuccess: "Stats reset", resetFail: "Reset failed. Please retry.",
     };
 
     // Theme-token-only styles; widths are relative so the panel follows the
@@ -54,21 +60,21 @@ window.__ModuleLoader__.load({
 .pq-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border:none;border-radius:5px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:0;flex:none;}
 .pq-iconbtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);}
 .pq-rows{display:flex;flex-direction:column;gap:1px;width:100%;max-height:220px;overflow-y:auto;}
-.pq-row{display:flex;flex-direction:column;gap:3px;padding:5px 6px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;}
+.pq-row{display:grid;grid-template-rows:16px 3px 13px;gap:3px;height:48px;flex:0 0 48px;padding:5px 6px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;overflow:hidden;}
 .pq-row:hover{background:var(--dsw-specific-sidebar-nav-item-hover);}
-.pq-line{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;width:100%;}
+.pq-line{grid-row:1;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;width:100%;line-height:16px;overflow:hidden;}
 .pq-label{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;}
 .pq-value{font-size:12px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;flex:none;}
 .pq-value.pq-muted{color:var(--dsw-alias-label-tertiary);font-size:11px;}
 .pq-value.pq-err{color:var(--dsw-alias-state-error-primary);font-size:11px;}
 .pq-link{font-size:11px;color:var(--dsw-alias-link);text-decoration:none;flex:none;}
 .pq-link:hover{text-decoration:underline;}
-.pq-localval{display:inline-flex;align-items:center;gap:6px;flex:none;min-width:0;}
-.pq-bar{height:3px;border-radius:2px;background:var(--dsw-alias-border-l1);overflow:hidden;width:100%;}
+.pq-localval{grid-row:3;min-width:0;width:100%;font-size:10px;line-height:13px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;}
+.pq-bar{grid-row:2;height:3px;border-radius:2px;background:var(--dsw-alias-border-l1);overflow:hidden;width:100%;}
 .pq-bar-fill{height:100%;border-radius:2px;background:var(--dsw-alias-brand-primary);}
 .pq-bar-fill.pq-warn{background:var(--dsw-alias-state-warning-primary);}
 .pq-bar-fill.pq-hot{background:var(--dsw-alias-state-error-primary);}
-.pq-detail{font-size:10px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%;}
+.pq-detail{grid-row:3;line-height:13px;min-width:0;font-size:10px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%;}
 .pq-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:4px 6px;}
 .pq-railbtn{display:flex;align-items:center;justify-content:center;width:36px;height:32px;margin:0 auto;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;}
 .pq-railbtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);}
@@ -85,6 +91,7 @@ window.__ModuleLoader__.load({
 .pq-num input{width:80px;padding:5px 8px;font-size:13px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l2);border-radius:6px;box-sizing:border-box;}
 .pq-btn{padding:5px 12px;font-size:12px;border:none;border-radius:6px;background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-inverted);cursor:pointer;}
 .pq-btn:hover{background:var(--dsw-alias-button-primary-hover);}
+.pq-btn:disabled{opacity:.55;cursor:wait;}
 .pq-switch{position:relative;display:inline-block;width:34px;height:20px;flex:none;}
 .pq-switch input{opacity:0;width:0;height:0;}
 .pq-switch .pq-track{position:absolute;inset:0;border-radius:20px;background:var(--dsw-alias-border-l2);transition:background .15s;cursor:pointer;}
@@ -177,11 +184,15 @@ window.__ModuleLoader__.load({
         if (s.detail) detail = h("div", { className: "pq-detail", title: s.detail }, s.detail);
       } else if (s.status === "local") {
         const u = s.usage;
-        value = h("span", { className: "pq-localval" },
-          h("span", { className: "pq-value", title: u ? `${u.requests} ${t("requests")}` : "" }, u ? fmtTokens(u.total) : "—"),
-          h("a", { className: "pq-link", href: s.link, target: "_blank", rel: "noreferrer" }, t("console")));
-        detail = h("div", { className: "pq-detail" },
-          u ? `${t("in")} ${fmtTokens(u.input)} · ${t("out")} ${fmtTokens(u.output)} · ${t("cache")} ${fmtTokens(u.cacheRead)}` : t("noUsageYet"));
+        const since = u?.since != null ? new Date(u.since) : null;
+        const details = [
+          s.tracking === false ? t("paused") : null,
+          u ? `${t("in")} ${fmtTokens(u.input)} · ${t("out")} ${fmtTokens(u.output)} · ${t("cacheRead")} ${fmtTokens(u.cacheRead)} · ${t("cacheWrite")} ${fmtTokens(u.cacheWrite)} · ${u.requests ?? 0} ${t("requests")} · ${t("since")} ${since && Number.isFinite(since.getTime()) ? since.toLocaleString() : t("unknownSince")}` : t("noUsageYet"),
+          t("usageDesc"),
+        ].filter(Boolean).join(" · ");
+        value = h("a", { className: "pq-link", href: s.link, target: "_blank", rel: "noreferrer" }, t("console"));
+        detail = h("div", { className: "pq-localval", title: details },
+          `${t("localUsed")} ${fmtTokens(u?.total)} tokens${s.tracking === false ? ` · ${t("paused")}` : ""}`);
       } else if (s.status === "loading" || s.status === "client-fetch") {
         value = h("span", { className: "pq-value pq-muted" }, "…");
       } else if (s.status === "console") {
@@ -194,7 +205,7 @@ window.__ModuleLoader__.load({
         value = h("span", { className: "pq-value pq-err", title: s.error ?? "" }, t("error"));
       }
       const showBar = s.status === "ok" && s.usedPercent != null && Number.isFinite(Number(s.usedPercent));
-      return h("div", { className: "pq-row" },
+      return h("div", { className: "pq-row" + (s.status === "local" ? " pq-row-local" : "") },
         h("div", { className: "pq-line" },
           h("span", { className: "pq-label", title: source.label }, source.label),
           value),
@@ -221,34 +232,42 @@ window.__ModuleLoader__.load({
       const [pos, setPos] = useState({ top: 0, left: 0 });
       const btnRef = useRef(null);
       const popRef = useRef(null);
+      const loadVersion = useRef(0);
 
       const load = useCallback(async () => {
+        const version = ++loadVersion.current;
         try {
           const res = await fetch("/api/provider-quota/list", { cache: "no-store" });
           const data = await res.json();
-          let list = data?.ok && Array.isArray(data.value?.sources) ? data.value.sources : [];
-          setRefreshSeconds(Math.min(3600, Math.max(5, Number(data?.value?.prefs?.refreshSeconds) || 60)));
-          const hidden = data?.value?.prefs?.hidden ?? {};
+          if (version !== loadVersion.current) return;
+          if (!res.ok || !data?.ok || !Array.isArray(data.value?.sources)) return;
+          const list = data.value.sources;
+          setRefreshSeconds(Math.min(3600, Math.max(5, Number(data.value.prefs?.refreshSeconds) || 60)));
+          const hidden = data.value.prefs?.hidden ?? {};
+          const visible = (items) => items.filter((s) => !hidden[s.id] && s.snapshot?.status !== "not-signed-in");
+          // Host snapshots (including local totals) must not wait for subscription RPC.
+          setSources(visible(list));
+          setLoading(false);
           const rpc = getRpc ? getRpc() : undefined;
           if (rpc && list.some((s) => s.snapshot?.status === "client-fetch")) {
             const providers = await fetchSubscriptionProviders(rpc);
-            list = await Promise.all(list.map(async (s) => {
-              if (s.snapshot && s.snapshot.status === "client-fetch") {
-                return { ...s, snapshot: await resolveSubscriptionUsage(rpc, providers, s.snapshot.provider) };
-              }
-              return s;
+            if (version !== loadVersion.current) return;
+            await Promise.all(list.map(async (s) => {
+              if (s.snapshot?.status !== "client-fetch") return;
+              const snapshot = await resolveSubscriptionUsage(rpc, providers, s.snapshot.provider);
+              if (version !== loadVersion.current) return;
+              setSources((current) => visible(current.map((item) => item.id === s.id ? { ...item, snapshot } : item)));
             }));
           }
-          setSources(list.filter((s) => !hidden[s.id] && s.snapshot?.status !== "not-signed-in"));
         } catch { /* keep last state; never throw */ }
-        finally { setLoading(false); }
+        finally { if (version === loadVersion.current) setLoading(false); }
       }, [getRpc]);
 
       useEffect(() => {
         load();
         const onChanged = () => load();
         window.addEventListener(PREFS_EVENT, onChanged);
-        return () => { window.removeEventListener(PREFS_EVENT, onChanged); };
+        return () => { ++loadVersion.current; window.removeEventListener(PREFS_EVENT, onChanged); };
       }, [load]);
       useEffect(() => {
         const timer = setInterval(load, refreshSeconds * 1000);
@@ -300,6 +319,16 @@ window.__ModuleLoader__.load({
       const [sources, setSources] = useState([]);
       const [intervalDraft, setIntervalDraft] = useState("");
       const [msg, setMsg] = useState(null);
+      const [resetting, setResetting] = useState(false);
+      const resetPending = useRef(false);
+      const msgTimer = useRef(null);
+
+      useEffect(() => () => clearTimeout(msgTimer.current), []);
+      const showMessage = (message) => {
+        clearTimeout(msgTimer.current);
+        setMsg(message);
+        msgTimer.current = setTimeout(() => setMsg(null), 2500);
+      };
 
       const load = useCallback(async () => {
         try {
@@ -320,12 +349,11 @@ window.__ModuleLoader__.load({
           });
           const data = await res.json();
           if (data?.ok) {
-            setPrefs(data.value); setMsg({ ok: true, text: t("saved") });
+            setPrefs(data.value); showMessage({ ok: true, text: t("saved") });
             window.dispatchEvent(new CustomEvent(PREFS_EVENT));
           }
-          else setMsg({ ok: false, text: t("saveFail") });
-        } catch { setMsg({ ok: false, text: t("saveFail") }); }
-        setTimeout(() => setMsg(null), 2500);
+          else showMessage({ ok: false, text: t("saveFail") });
+        } catch { showMessage({ ok: false, text: t("saveFail") }); }
       }, [t]);
 
       const applyInterval = () => {
@@ -339,14 +367,19 @@ window.__ModuleLoader__.load({
         save({ hidden });
       };
       const resetUsage = async () => {
+        if (resetPending.current || !window.confirm(t("resetConfirm"))) return;
+        resetPending.current = true;
+        setResetting(true);
+        clearTimeout(msgTimer.current);
+        setMsg(null);
         try {
           const res = await fetch("/api/provider-quota/usage/reset", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
           const data = await res.json();
           if (!res.ok || !data?.ok) throw new Error("reset failed");
           window.dispatchEvent(new CustomEvent(PREFS_EVENT));
-          setMsg({ ok: true, text: t("saved") });
-        } catch { setMsg({ ok: false, text: t("saveFail") }); }
-        setTimeout(() => setMsg(null), 2500);
+          showMessage({ ok: true, text: t("resetSuccess") });
+        } catch { showMessage({ ok: false, text: t("resetFail") }); }
+        finally { resetPending.current = false; setResetting(false); }
       };
 
       if (!prefs) return h("div", { className: "pq-set" }, h("p", { className: "pq-desc" }, t("loading")));
@@ -386,7 +419,7 @@ window.__ModuleLoader__.load({
             h(Switch, { checked: !!prefs.trackUsage, onChange: (v) => save({ trackUsage: v }), label: t("trackUsage") })),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("usageTitle")),
-            h("button", { type: "button", className: "pq-btn", onClick: resetUsage }, t("reset")))),
+            h("button", { type: "button", className: "pq-btn", disabled: resetting, "aria-busy": resetting, onClick: resetUsage }, t(resetting ? "resetting" : "reset")))),
 
         h("div", { className: "pq-set-group" },
           h("h3", null, t("visibility")),

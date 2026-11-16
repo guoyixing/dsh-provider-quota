@@ -18,7 +18,7 @@
 // The caller-context binding that makes register() auto-clean is enabled with
 // the global `cordis.tracker` symbol instead of extending cordis's Service.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -138,43 +138,78 @@ export function apply(ctx, config) {
   // per-request `usage` reported by the model stream. This counts only DSH
   // traffic, not the plan's real remaining Credits.
   const usagePath = join(prefsDir, "usage.json");
-  let usage = {}; // provider -> { input, output, total, cacheRead, cacheWrite, requests, since }
-  try { if (existsSync(usagePath)) usage = JSON.parse(readFileSync(usagePath, "utf8")) ?? {}; } catch { usage = {}; }
+  let usage = Object.create(null); // provider -> numeric counters; never prompt/output text
+  const counterKeys = ["input", "output", "total", "cacheRead", "cacheWrite", "requests"];
+  const count = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value)) : 0;
+  const addCount = (a, b) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
+  try {
+    const stored = existsSync(usagePath) ? JSON.parse(readFileSync(usagePath, "utf8")) : null;
+    if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+      for (const [provider, value] of Object.entries(stored)) {
+        if (!value || typeof value !== "object" || !count(value.requests)) continue;
+        usage[provider] = Object.fromEntries(counterKeys.map((key) => [key, count(value[key])]));
+        usage[provider].since = count(value.since) || null;
+      }
+    }
+  } catch { /* invalid data is never fed into counters */ }
   let usageDirty = false;
+  let usageEpoch = 0; // Reset/toggle invalidates already-running streams.
+  let disposed = false;
 
-  function isQwenProvider(p) { return /qwen|token-plan|qianwen/i.test(String(p ?? "")); }
+  function isQwenProvider(provider, conf = piAiProviders()[provider]) {
+    if (typeof provider !== "string" || !provider) return false;
+    if (/qwen|token-plan|qianwen/i.test(provider)) return true;
+    try {
+      const host = new URL(conf?.baseURL).hostname;
+      return /(^|\.)(qianwenaiapi\.com|dashscope\.aliyuncs\.com)$/.test(host);
+    } catch { return false; }
+  }
+
+  function normalizeUsage(u) {
+    if (!u || typeof u !== "object") return null;
+    const keys = ["inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"];
+    if (!keys.some((key) => typeof u[key] === "number" && Number.isFinite(u[key]) && u[key] >= 0)) return null;
+    const input = count(u.inputTokens), output = count(u.outputTokens);
+    const cacheRead = count(u.cacheReadTokens), cacheWrite = count(u.cacheWriteTokens);
+    return {
+      input, output, cacheRead, cacheWrite,
+      total: typeof u.totalTokens === "number" && Number.isFinite(u.totalTokens) && u.totalTokens >= 0
+        ? count(u.totalTokens) : addCount(addCount(input, output), addCount(cacheRead, cacheWrite)),
+    };
+  }
 
   function recordUsage(provider, u) {
-    if (!prefs.trackUsage || !u) return;
+    if (disposed || !prefs.trackUsage || !u) return;
     const cur = usage[provider] ?? { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0, requests: 0, since: Date.now() };
-    const input = Number(u.inputTokens ?? 0);
-    const output = Number(u.outputTokens ?? 0);
-    cur.input += Number.isFinite(input) ? input : 0;
-    cur.output += Number.isFinite(output) ? output : 0;
-    const total = Number(u.totalTokens ?? input + output);
-    cur.total += Number.isFinite(total) ? total : 0;
-    cur.cacheRead += Number(u.cacheReadTokens ?? 0) || 0;
-    cur.cacheWrite += Number(u.cacheWriteTokens ?? 0) || 0;
-    cur.requests += 1;
+    for (const key of counterKeys) cur[key] = addCount(cur[key], key === "requests" ? 1 : u[key]);
     usage[provider] = cur;
     usageDirty = true;
+    updatedAt = Date.now();
+    persistUsage();
   }
 
   function persistUsage() {
-    if (!usageDirty) return;
-    usageDirty = false;
-    try { mkdirSync(prefsDir, { recursive: true }); writeFileSync(usagePath, JSON.stringify(usage), "utf8"); } catch { /* non-fatal */ }
+    if (!usageDirty) return true;
+    try {
+      mkdirSync(prefsDir, { recursive: true });
+      // Both absolute targets are fixed children of the plugin's data directory.
+      const temporaryPath = join(prefsDir, "usage.json.tmp");
+      writeFileSync(temporaryPath, JSON.stringify(usage), { encoding: "utf8", mode: 0o600 });
+      renameSync(temporaryPath, usagePath);
+      usageDirty = false;
+      return true;
+    } catch {
+      ctx.logger?.warn?.("provider-quota: failed to persist local usage; will retry");
+      return false; // Keep dirty data for the next refresh/disposal retry.
+    }
   }
 
-  function qwenUsage() {
-    const agg = { input: 0, output: 0, total: 0, cacheRead: 0, cacheWrite: 0, requests: 0, since: null };
-    for (const [p, u] of Object.entries(usage)) {
-      if (!isQwenProvider(p)) continue;
-      agg.input += u.input ?? 0; agg.output += u.output ?? 0; agg.total += u.total ?? 0;
-      agg.cacheRead += u.cacheRead ?? 0; agg.cacheWrite += u.cacheWrite ?? 0; agg.requests += u.requests ?? 0;
-      if (u.since && (agg.since === null || u.since < agg.since)) agg.since = u.since;
-    }
-    return agg.requests > 0 ? agg : null;
+  function localView(provider) {
+    return {
+      status: "local", link: QWEN_CONSOLE_URL, tracking: !!prefs.trackUsage,
+      usage: usage[provider] ? { ...usage[provider] } : null,
+    };
   }
 
   const ownerCtx = ctx;
@@ -212,7 +247,10 @@ export function apply(ctx, config) {
   function list() {
     return [...sources.values()]
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.label).localeCompare(String(b.label)))
-      .map((s) => ({ id: s.id, label: s.label, order: s.order ?? 0, snapshot: s.snapshot ?? { status: "loading" } }));
+      .map((s) => ({
+        id: s.id, label: s.label, order: s.order ?? 0,
+        snapshot: s.localProvider ? { ...localView(s.localProvider), updatedAt } : s.snapshot ?? { status: "loading" },
+      }));
   }
   async function refresh(id) {
     const targets = id === undefined ? [...sources.values()] : [sources.get(id)].filter(Boolean);
@@ -301,13 +339,19 @@ export function apply(ctx, config) {
         if (SUBSCRIPTION_PROVIDERS.has(name.split("/")[0].toLowerCase())) continue;
         desired.set(`provider:${name}`, {
           id: `provider:${name}`, label: conf?.displayName || name, order: 0,
+          localProvider: isQwenProvider(name, conf) ? name : undefined,
           fetch: () => fetchProviderBalance(name, conf),
         });
       }
       for (const p of providers) {
         const base = p.id.split("/")[0].toLowerCase();
         if (SUBSCRIPTION_PROVIDERS.has(base) || /^factory/i.test(p.id) || piAi[p.id]) continue;
-        if (/deepseek/i.test(p.id)) {
+        if (isQwenProvider(p.id)) {
+          desired.set(`provider:${p.id}`, {
+            id: `provider:${p.id}`, label: p.name || p.id, order: 0,
+            localProvider: p.id, fetch: () => localView(p.id),
+          });
+        } else if (/deepseek/i.test(p.id)) {
           const isAccount = /account/i.test(p.id);
           desired.set(`provider:${p.id}`, {
             id: `provider:${p.id}`, label: p.name || p.id, order: 0,
@@ -319,7 +363,10 @@ export function apply(ctx, config) {
       }
     }
 
-    for (const [id, source] of desired) if (!sources.has(id)) install(source, ownerCtx);
+    for (const [id, source] of desired) {
+      if (!sources.has(id)) install(source, ownerCtx);
+      else Object.assign(sources.get(id), source); // Do not retain stale provider configuration.
+    }
     for (const id of [...sources.keys()]) {
       if ((id.startsWith("provider:") || id.startsWith("plugin:")) && !desired.has(id)) remove(id);
     }
@@ -356,9 +403,7 @@ export function apply(ctx, config) {
     const baseURL = String(conf?.baseURL ?? "");
     // Qwen Token Plan: no public API-key balance endpoint. Show locally-tracked
     // DSH token usage plus a link to the console for the real remaining Credits.
-    if (/qianwenaiapi|token-plan|qwen/i.test(baseURL) || isQwenProvider(name)) {
-      return { status: "local", link: QWEN_CONSOLE_URL, usage: qwenUsage() };
-    }
+    if (isQwenProvider(name, conf)) return localView(name);
     if (!/deepseek/i.test(baseURL) && !/deepseek/i.test(name)) {
       return { status: "unsupported", detail: "no balance API" };
     }
@@ -434,15 +479,23 @@ export function apply(ctx, config) {
     const off = ctx.on("llm/stream", (options, next) => {
       const stream = next();
       const provider = options?.provider;
-      if (!isQwenProvider(provider)) return stream;
+      if (!prefs.trackUsage || disposed || !isQwenProvider(provider)) return stream;
+      const epoch = usageEpoch;
       return (async function* () {
-        for await (const chunk of stream) {
-          if (chunk && chunk.type === "usage" && chunk.usage) recordUsage(provider, chunk.usage);
-          yield chunk;
+        let latest = null;
+        try {
+          for await (const chunk of stream) {
+            // Usage is a cumulative snapshot, not a delta. Keep the last valid
+            // report; finalize once even on cancellation or an upstream error.
+            if (chunk?.type === "usage") latest = normalizeUsage(chunk.usage) ?? latest;
+            yield chunk;
+          }
+        } finally {
+          if (epoch === usageEpoch) recordUsage(provider, latest);
         }
       })();
     });
-    return () => off();
+    return () => { disposed = true; usageEpoch++; off(); persistUsage(); };
   }, "provider-quota: usage observer");
 
   // -- HTTP routes for the Client ------------------------------------------
@@ -500,7 +553,11 @@ export function apply(ctx, config) {
           if (typeof body.bridgeFactory === "boolean") prefs.bridgeFactory = body.bridgeFactory;
           if (typeof body.bridgeSubscriptions === "boolean") prefs.bridgeSubscriptions = body.bridgeSubscriptions;
           if (typeof body.queryProviders === "boolean") prefs.queryProviders = body.queryProviders;
-          if (typeof body.trackUsage === "boolean") prefs.trackUsage = body.trackUsage;
+          if (typeof body.trackUsage === "boolean" && prefs.trackUsage !== body.trackUsage) {
+            usageEpoch++;
+            prefs.trackUsage = body.trackUsage;
+            updatedAt = Date.now();
+          }
           if (body.hidden && typeof body.hidden === "object") prefs.hidden = { ...body.hidden };
           savePrefs();
           startLoop();
@@ -512,11 +569,15 @@ export function apply(ctx, config) {
         kind: "exact", path: `${ROUTE_PREFIX}/usage/reset`,
         handler: guarded(async (req, res) => {
           if (req.method !== "POST") { replyJson(res, 405, { ok: false, error: { message: "POST only" } }); return; }
-          usage = {};
+          usageEpoch++;
+          usage = Object.create(null);
           usageDirty = true;
-          persistUsage();
-          await refreshAll();
-          replyJson(res, 200, { ok: true });
+          updatedAt = Date.now();
+          const saved = persistUsage();
+          // No network refresh is needed: list() projects local counters live.
+          replyJson(res, saved ? 200 : 500, saved ? { ok: true } : {
+            ok: false, error: { message: "failed to persist usage reset; will retry" },
+          });
         }),
       },
     ];
