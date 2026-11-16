@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+.npm-cache/
+*.tgz
+.env
+.env.*
+.npmrc
+coverage/

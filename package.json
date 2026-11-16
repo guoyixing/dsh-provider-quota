@@ -1,0 +1,55 @@
+{
+  "name": "@keyboard-dog/dsh-provider-quota",
+  "repository": { "type": "git", "url": "git+https://github.com/guoyixing/dsh-provider-quota.git" },
+  "homepage": "https://github.com/guoyixing/dsh-provider-quota#readme",
+  "bugs": { "url": "https://github.com/guoyixing/dsh-provider-quota/issues" },
+  "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check client.js",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "version": "1.0.0",
+  "description": "Shows each model provider's remaining quota above the account row in the DeepSeek Harness left sidebar. Aggregates DSH-configured providers, bridges factory/subscription plugin quota, and tracks Qwen DSH token usage locally. A plugin's rows disappear automatically when it is removed.",
+  "type": "module",
+  "license": "MIT",
+  "author": "敲代码的旺财 <904985041@qq.com>",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "quota",
+    "balance",
+    "usage",
+    "llm",
+    "provider",
+    "sidebar"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ]
+    }
+  }
+}

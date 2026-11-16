@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Provider quota",
+    "description": "Shows each model provider's remaining quota above the account row in the left sidebar. Aggregates DSH-configured providers and quota registered by other plugins; a plugin's rows disappear automatically when it is removed."
+  }
+}

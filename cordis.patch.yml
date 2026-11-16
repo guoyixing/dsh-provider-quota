@@ -1,0 +1,8 @@
+- insert:
+    - id: provider-quota
+      name: '@keyboard-dog/dsh-provider-quota'
+      config:
+        refreshSeconds: 60
+        queryProviders: true
+        bridgeFactory: true
+        bridgeSubscriptions: true
