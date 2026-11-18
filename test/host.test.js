@@ -3,11 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { Readable } from "node:stream";
 import { apply, inject } from "../index.js";
 
 const ORIGIN = "http://127.0.0.1:61768";
-const HOST = new URL(ORIGIN).host;
 const PREFIX = "/api/provider-quota";
 const PACKAGE = "@keyboard-dog/dsh-provider-quota";
 const flush = () => new Promise((done) => setImmediate(done));
@@ -67,13 +65,17 @@ async function harness(t, options = {}) {
         entry: { options: { id: "llm-pi-ai" } },
         override: { providers: state.config },
       }] }],
-      ["webServer", {
-        getOrigin: () => ORIGIN,
-        register(route) {
-          assert.equal(route.kind, "exact");
-          assert.equal(routes.has(route.path), false, `duplicate route ${route.path}`);
-          routes.set(route.path, route);
-          return () => routes.delete(route.path);
+      ["webServer", { getOrigin: () => ORIGIN }],
+      ["connection", {
+        fetch: {
+          register(route) {
+            // DSH owns registrations for the plugin's lifetime; model cleanup here.
+            ctx.effect(() => {
+              assert.equal(routes.has(route.path), false, `duplicate route ${route.path}`);
+              routes.set(route.path, route);
+              return () => routes.delete(route.path);
+            });
+          },
         },
       }],
     ]);
@@ -121,34 +123,47 @@ async function harness(t, options = {}) {
   return { ctx, state, home, env, boot, intervals, fetchCalls };
 }
 
+async function dispatch(ctx, request, session) {
+  const route = ctx.routes.get(new URL(request.url).pathname);
+  if (!route?.methods.includes(request.method)) return new Response(null, { status: 404 });
+  // This fixture models admission before the plugin handler; it does not validate DSH auth.
+  if (session !== "owner") return new Response(null, { status: 401 });
+  const response = await route.fetch(request);
+  assert.ok(response instanceof Response, "handler must return a Fetch Response");
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  return response;
+}
+
 async function request(ctx, path, options = {}) {
   const method = options.method ?? "GET";
-  const body = options.rawBody ?? JSON.stringify(options.body ?? {});
-  const req = Readable.from(method === "POST" ? [body] : []);
-  req.method = method;
-  req.url = `${PREFIX}${path}`;
-  req.socket = options.noSocket ? undefined : { remoteAddress: options.address ?? "127.0.0.1" };
-  req.headers = {
-    host: HOST,
-    ...(method === "POST" ? { origin: ORIGIN, "content-type": "application/json" } : {}),
-    ...options.headers,
-  };
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value === undefined) delete req.headers[key];
+  // Model the authenticated Electron bridge by default: no Origin or Sec-Fetch-Site.
+  const headers = new Headers(method === "POST" ? { "content-type": "application/json" } : {});
+  for (const [key, value] of Object.entries(options.headers ?? {})) {
+    if (value === undefined) headers.delete(key);
+    else headers.set(key, value);
   }
-  let status;
-  let headers;
-  let result;
-  const res = {
-    writeHead(code, responseHeaders) { status = code; headers = responseHeaders; },
-    end(text) { result = JSON.parse(text); },
-  };
-  const route = ctx.routes.get(req.url);
-  assert.ok(route, `registered route ${req.url}`);
-  await route.handler(req, res);
-  assert.ok(status, "handler must send an HTTP response");
-  assert.equal(headers["cache-control"], "no-store");
-  return { status, body: result, headers };
+  const init = { method, headers };
+  if (method === "POST") {
+    if (options.chunks) {
+      const chunks = options.chunks[Symbol.iterator]();
+      init.body = new ReadableStream({
+        pull(controller) {
+          const chunk = chunks.next();
+          if (chunk.done) controller.close();
+          else controller.enqueue(chunk.value);
+        },
+      });
+      init.duplex = "half";
+    } else {
+      // Byte bodies avoid Request adding a text/plain Content-Type when a test omits it.
+      init.body = Buffer.from(options.rawBody ?? JSON.stringify(options.body ?? {}));
+    }
+  }
+  const req = new Request(`${ORIGIN}${PREFIX}${path}`, init);
+  const response = await dispatch(ctx, req, options.session ?? "owner");
+  if (response.body === null) return { status: response.status, body: null };
+  assert.match(response.headers.get("content-type") ?? "", /^application\/json(?:;|$)/i);
+  return { status: response.status, body: await response.json() };
 }
 
 function ids(ctx) {
@@ -175,12 +190,42 @@ test("package export and patch use the published scoped package", () => {
   assert.equal(pkg.exports["."], "./index.js");
   assert.ok(patch.includes(`name: '${PACKAGE}'`) || patch.includes(`name: "${PACKAGE}"`));
   assert.ok(!patch.includes("@local/provider-quota"));
-  assert.deepEqual(inject, ["webServer", "llm"]);
+  assert.deepEqual(inject, ["webServer", "llm", "connection"]);
 });
 
-test("registers service/routes, sorts sources, and disposes caller-owned sources", async (t) => {
+test("visibility saves preserve a provider id split across UTF-8 chunks", async (t) => {
+  const { ctx } = await harness(t);
+  const id = "provider:千问";
+  const encoded = Buffer.from(JSON.stringify({ visibility: { id, visible: false } }));
+  const split = encoded.indexOf(Buffer.from("千")) + 1;
+  const result = await request(ctx, "/prefs", { method: "POST", chunks: [encoded.subarray(0, split), encoded.subarray(split)] });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.value.hidden, { [id]: true });
+});
+
+test("a blocked quota source does not block fresh snapshots from other sources", async (t) => {
   const { ctx, intervals } = await harness(t);
-  assert.deepEqual([...ctx.routes.keys()].sort(), ["/list", "/prefs", "/refresh", "/usage/reset"].map((p) => PREFIX + p).sort());
+  let abortSignal;
+  let queries = 0;
+  const removeSlow = ctx.registry.register({ id: "custom:slow", label: "Slow", fetch(signal) {
+    abortSignal = signal;
+    return new Promise(() => {});
+  } });
+  ctx.registry.register({ id: "custom:fast", label: "Fast", fetch: async () => ({ status: "ok", remaining: String(++queries) }) });
+  const initialRefresh = ctx.registry.refreshAll();
+  await flush();
+  assert.equal(queries, 1);
+  for (const timer of intervals.values()) timer.callback();
+  await flush();
+  assert.equal(ctx.registry.list().find((s) => s.id === "custom:fast").snapshot.remaining, "2");
+  removeSlow();
+  assert.ok(abortSignal.aborted);
+  await initialRefresh;
+  assert.ok(!ids(ctx).includes("custom:slow"));
+});
+
+test("registers the service, sorts sources, and disposes caller-owned sources and routes", async (t) => {
+  const { ctx, intervals } = await harness(t);
   assert.equal(intervals.size, 1);
   assert.deepEqual(ctx.registry[Symbol.for("cordis.tracker")], { property: "ctx", noShadow: true });
   assert.throws(() => ctx.registry.register({ id: "broken" }), /source needs/);
@@ -415,52 +460,95 @@ test("preferences clamp refresh interval, persist, and toggle owned sources and 
   assert.deepEqual(prefs.body.value, stored);
 });
 
-test("HTTP guard accepts local same-origin requests and rejects foreign socket/Host/Origin", async (t) => {
+test("registers exact Connection Fetch routes with explicit methods and body modes", async (t) => {
   const { ctx } = await harness(t);
-  for (const address of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
-    assert.equal((await request(ctx, "/list", { address })).status, 200);
-  }
-  assert.equal((await request(ctx, "/list", { headers: { origin: ORIGIN, "sec-fetch-site": "same-origin" } })).status, 200);
-  const invalid = [
-    { address: "192.0.2.1" }, { address: "" }, { noSocket: true },
-    { headers: { host: "attacker.invalid:61768" } },
-    { headers: { host: "127.0.0.1:9999" } },
-    { headers: { host: undefined } },
-    { headers: { origin: "https://attacker.invalid" } },
-    { headers: { origin: "null" } },
-    { headers: { origin: "http://localhost:61768" } },
-    { headers: { "sec-fetch-site": "cross-site" } },
-  ];
-  for (const path of ["/list", "/prefs", "/refresh", "/usage/reset"]) {
-    const method = path === "/list" || path === "/prefs" ? "GET" : "POST";
-    for (const options of invalid) {
-      const response = await request(ctx, path, { method, ...options });
-      assert.equal(response.status, 403, `${path}: ${JSON.stringify(options)}`);
-      assert.equal(response.body.ok, false);
-    }
+  const routes = [...ctx.routes.values()].map(({ path, methods, requestBody, fetch }) => {
+    assert.equal(typeof fetch, "function");
+    return [path, [...methods].sort(), requestBody];
+  });
+  assert.deepEqual(routes.sort(([a], [b]) => a.localeCompare(b)), [
+    [`${PREFIX}/list`, ["GET", "HEAD"], "buffered"],
+    [`${PREFIX}/prefs`, ["GET", "POST"], "buffered"],
+    [`${PREFIX}/refresh`, ["POST"], "buffered"],
+    [`${PREFIX}/usage/reset`, ["POST"], "buffered"],
+  ]);
+  assert.deepEqual(await request(ctx, "/list", { method: "HEAD" }), { status: 200, body: null });
+  assert.deepEqual(await request(ctx, "/list?test=1"), await request(ctx, "/list"));
+  for (const [path, method] of [["/list/extra", "GET"], ["/list", "PUT"], ["/prefs", "HEAD"], ["/refresh", "GET"], ["/usage/reset", "GET"]]) {
+    assert.equal((await request(ctx, path, { method })).status, 404, `${method} ${path}`);
   }
 });
 
-test("every POST requires matching Origin and application/json before changing state", async (t) => {
-  const { ctx } = await harness(t);
+test("an Origin-less desktop owner admitted by the fixture can save prefs and refresh quota", async (t) => {
+  const { ctx, home } = await harness(t);
+  const id = "custom:desktop";
+  let queries = 0;
+  ctx.registry.register({ id, label: "Desktop test quota", fetch: async () => ({ status: "ok", remaining: String(++queries) }) });
+  await flush();
+  const initial = await request(ctx, "/list");
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.ok, true);
+  assert.equal(initial.body.value.sources[0].snapshot.remaining, "1");
+
+  // Matching routes are denied by the fixture before invoking plugin handlers.
+  const change = { method: "POST", body: { refreshSeconds: 123, visibility: { id, visible: false } } };
+  assert.equal((await request(ctx, "/list", { session: "anonymous" })).status, 401);
+  assert.equal((await request(ctx, "/prefs", { ...change, session: "anonymous" })).status, 401);
+  assert.deepEqual((await request(ctx, "/prefs")).body.value, initial.body.value.prefs);
+
+  const save = await request(ctx, "/prefs", change);
+  assert.equal(save.status, 200);
+  assert.deepEqual(save.body, { ok: true, value: { ...initial.body.value.prefs, refreshSeconds: 123, hidden: { [id]: true } } });
+  assert.deepEqual(await request(ctx, "/prefs"), save);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, "plugins", "provider-quota", "prefs.json"), "utf8")), save.body.value);
+
+  const refreshed = await request(ctx, "/refresh", { method: "POST" });
+  assert.equal(refreshed.status, 200);
+  assert.equal(refreshed.body.ok, true);
+  assert.deepEqual(refreshed.body.value.prefs, save.body.value);
+  const [source] = refreshed.body.value.sources;
+  assert.equal(source.id, id);
+  assert.equal(source.snapshot.remaining, "2");
+  assert.ok(refreshed.body.value.updatedAt >= initial.body.value.updatedAt);
+  assert.deepEqual(await request(ctx, "/list"), refreshed);
+});
+
+test("every POST checks application/json before changing state", async (t) => {
+  const { ctx } = await harness(t, { config: { qwen: {} } });
+  let queries = 0;
+  ctx.registry.register({ id: "custom:counter", label: "Counter", fetch: async () => ({ status: "ok", remaining: String(++queries) }) });
+  await flush();
+  await stream(ctx, "qwen", [{ type: "usage", usage: { totalTokens: 7 } }]);
+  const before = await request(ctx, "/list");
   for (const path of ["/prefs", "/refresh", "/usage/reset"]) {
-    for (const headers of [
-      { origin: undefined }, { origin: "https://attacker.invalid" },
-      { "content-type": undefined }, { "content-type": "text/plain" },
-      { "content-type": "application/x-www-form-urlencoded" },
-      { "content-type": "application/json-evil" },
-      { "sec-fetch-site": "cross-site" },
-    ]) {
-      const response = await request(ctx, path, { method: "POST", headers, body: { refreshSeconds: 123 } });
-      assert.ok([403, 415].includes(response.status), `${path}: ${JSON.stringify(headers)} returned ${response.status}`);
-      assert.equal(response.body.ok, false);
+    for (const contentType of [undefined, "text/plain", "application/x-www-form-urlencoded", "application/json-evil"]) {
+      const response = await request(ctx, path, { method: "POST", headers: { "content-type": contentType }, body: { refreshSeconds: 123 } });
+      assert.equal(response.status, 415, `${path}: ${contentType}`);
+      assert.deepEqual(response.body, { ok: false, error: { message: "application/json required" } });
     }
-    assert.equal((await request(ctx, path, { method: "POST", headers: { "content-type": "application/json; charset=utf-8" } })).status, 200);
   }
-  assert.equal((await request(ctx, "/prefs")).body.value.refreshSeconds, 60);
-  assert.equal((await request(ctx, "/prefs", { method: "POST", rawBody: "{" })).status, 400);
-  assert.equal((await request(ctx, "/list", { method: "PUT" })).status, 405);
-  assert.equal((await request(ctx, "/refresh")).status, 405);
+  assert.deepEqual(await request(ctx, "/list"), before);
+  assert.equal(queries, 1);
+  for (const path of ["/prefs", "/refresh", "/usage/reset"]) {
+    assert.equal((await request(ctx, path, { method: "POST", headers: { "content-type": "Application/JSON; charset=utf-8" } })).status, 200);
+  }
+});
+
+test("prefs rejects malformed JSON and measures its body limit in bytes", async (t) => {
+  const { ctx } = await harness(t);
+  const post = (options) => request(ctx, "/prefs", { method: "POST", ...options });
+  const original = await request(ctx, "/prefs");
+  const head = Buffer.from('{"refreshSeconds":123,"padding":"');
+  const tail = Buffer.from('"}');
+  const padding = Buffer.from("千".repeat(300_000));
+  const rest = Buffer.alloc(1_000_000 - head.length - padding.length - tail.length, 0x61);
+  for (const options of [{ rawBody: "{" }, { rawBody: "[]" }, { chunks: [head, padding, rest, Buffer.from("a"), tail] }]) {
+    assert.deepEqual(await post(options), { status: 400, body: { ok: false, error: { message: "invalid prefs body" } } });
+  }
+  assert.deepEqual(await request(ctx, "/prefs"), original);
+  const atLimit = await post({ chunks: [head, padding, rest, tail] });
+  assert.equal(atLimit.status, 200);
+  assert.equal(atLimit.body.value.refreshSeconds, 123);
 });
 
 test("untrusted DeepSeek proxy with missing explicit key never receives the default key", async (t) => {
@@ -482,4 +570,45 @@ test("untrusted DeepSeek proxy with missing explicit key never receives the defa
   ctx.services.set("credentials", { resolve: async () => { throw new Error("credential store unavailable"); } });
   await ctx.registry.refresh();
   assert.equal(fetchCalls.length, 0, "credential lookup failure must not enable global-key fallback");
+});
+
+test("item visibility patches merge concurrent changes, including unusual ids, and survive restart", async (t) => {
+  const { ctx, boot } = await harness(t);
+  const warnings = [];
+  ctx.logger.warn = (message) => warnings.push(message);
+  const post = (body) => request(ctx, "/prefs", { method: "POST", body });
+  const change = (id, visible) => post({ visibility: { id, visible } });
+  assert.equal((await post({ hidden: { legacy: true } })).status, 200);
+  const writes = await Promise.all([change("甲", false), change("__proto__", false)]);
+  assert.deepEqual(writes.map((r) => r.status), [200, 200], JSON.stringify(writes));
+  const expected = { legacy: true, 甲: true, ["__proto__"]: true };
+  assert.deepEqual((await request(ctx, "/list")).body.value.prefs.hidden, expected);
+  assert.equal((await post({ visibility: { id: "甲", visible: "no" } })).status, 400);
+  assert.equal((await post({ hidden: {}, visibility: { id: "甲", visible: true } })).status, 400);
+  assert.equal((await change("甲", true)).status, 200);
+  ctx.dispose();
+  assert.deepEqual((await request(boot(), "/prefs")).body.value.hidden, { legacy: true, ["__proto__"]: true });
+});
+
+test("failed preference persistence leaves memory, file and timers unchanged; retry commits", async (t) => {
+  const { ctx, home, intervals } = await harness(t);
+  const post = (body) => request(ctx, "/prefs", { method: "POST", body });
+  assert.equal((await post({ hidden: { keep: true } })).status, 200);
+  const original = (await request(ctx, "/prefs")).body.value;
+  const dir = join(home, "plugins", "provider-quota");
+  const temporary = join(dir, `prefs.${process.pid}.tmp`);
+  mkdirSync(temporary); // deterministic write failure even with elevated file permissions
+  const patch = { visibility: { id: "new", visible: false }, refreshSeconds: 12, trackUsage: false };
+  const originalTimer = [...intervals.keys()][0];
+  const failure = await post(patch);
+  assert.equal(failure.status, 500);
+  assert.equal(failure.body.ok, false);
+  assert.deepEqual((await request(ctx, "/list")).body.value.prefs, original);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "prefs.json"), "utf8")), original);
+  assert.deepEqual([...intervals.keys()], [originalTimer]);
+  rmdirSync(temporary);
+  const retry = await post(patch);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(retry.body.value.hidden, { keep: true, new: true });
+  assert.equal(retry.body.value.trackUsage, false);
 });

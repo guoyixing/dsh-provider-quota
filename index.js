@@ -23,7 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const name = "provider-quota";
-export const inject = ["webServer", "llm"];
+export const inject = ["webServer", "llm", "connection"];
 
 const ROUTE_PREFIX = "/api/provider-quota";
 const FACTORY_BASE_RE = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/api\/dsh-factory-provider\//;
@@ -38,28 +38,33 @@ const QWEN_CONSOLE_URL = "https://platform.qianwenai.com/home/analytics/token-pl
 // Small helpers
 // ---------------------------------------------------------------------------
 
-function isLoopback(req) {
-  const addr = req.socket?.remoteAddress ?? "";
-  return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+function replyJson(status, value) {
+  return Response.json(value, { status, headers: { "cache-control": "no-store" } });
 }
 
-function replyJson(res, status, value) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-  res.end(JSON.stringify(value));
+function apiError(status, message) {
+  return replyJson(status, { ok: false, error: { message } });
+}
+
+async function readBody(request) {
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of request.body ?? []) {
+      size += chunk.byteLength;
+      if (size > 1e6) return null;
+      chunks.push(chunk);
+    }
+    return size ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+  } catch { return null; }
 }
 
 async function fetchJson(url, options = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    const text = await res.text();
-    let data;
-    try { data = text.length ? JSON.parse(text) : null; } catch { data = null; }
-    return { status: res.status, ok: res.ok, data };
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetch(url, options);
+  const text = await res.text();
+  let data;
+  try { data = text.length ? JSON.parse(text) : null; } catch { data = null; }
+  return { status: res.status, ok: res.ok, data };
 }
 
 function fmtMoney(amount, currency) {
@@ -124,12 +129,16 @@ export function apply(ctx, config) {
     }
   } catch { /* corrupted prefs fall back to defaults */ }
 
-  function savePrefs() {
+  function savePrefs(next) {
     try {
       mkdirSync(prefsDir, { recursive: true });
-      writeFileSync(prefsPath, JSON.stringify(prefs, null, 2), "utf8");
+      const temporaryPath = join(prefsDir, `prefs.${process.pid}.tmp`);
+      writeFileSync(temporaryPath, JSON.stringify(next, null, 2), { encoding: "utf8", mode: 0o600 });
+      renameSync(temporaryPath, prefsPath);
+      return true;
     } catch (error) {
       ctx.logger?.warn?.(`provider-quota: failed to persist prefs: ${error?.message ?? error}`);
+      return false;
     }
   }
 
@@ -215,34 +224,59 @@ export function apply(ctx, config) {
   const ownerCtx = ctx;
   const sources = new Map(); // id -> { id, label, order, fetch, snapshot }
   let updatedAt = 0;
-  let refreshing = false;
+  const inFlight = new WeakMap(); // one shared refresh per installed source
 
   // -- registry internals ---------------------------------------------------
 
-  function add(source) { sources.set(source.id, source); updatedAt = Date.now(); }
-  function remove(id) { if (sources.delete(id)) updatedAt = Date.now(); }
+  function remove(id) {
+    const source = sources.get(id);
+    if (!source) return;
+    sources.delete(id);
+    inFlight.get(source)?.controller.abort();
+    updatedAt = Date.now();
+  }
   function install(source, scopeCtx) {
     if (!source || typeof source.id !== "string" || typeof source.fetch !== "function") {
       throw new Error("providerQuota.register: source needs an id and a fetch()");
     }
     const id = source.id;
     return scopeCtx.effect(() => {
-      add({ ...source, snapshot: sources.get(id)?.snapshot ?? { status: "loading" } });
-      void fetchInto(sources.get(id));
-      return () => remove(id);
+      const snapshot = sources.get(id)?.snapshot ?? { status: "loading" };
+      remove(id);
+      const installed = { ...source, snapshot };
+      sources.set(id, installed);
+      updatedAt = Date.now();
+      void fetchInto(installed);
+      return () => { if (sources.get(id) === installed) remove(id); };
     }, `provider-quota: source ${id}`);
   }
-  async function fetchInto(source) {
-    if (!source) return;
+  function fetchInto(source) {
+    const ongoing = inFlight.get(source);
+    if (ongoing) return ongoing.promise;
     const controller = new AbortController();
-    try {
-      const view = await source.fetch(controller.signal);
-      source.snapshot = { ...(view ?? errorView("empty result")), updatedAt: Date.now() };
-    } catch (error) {
-      source.snapshot = { ...errorView(error instanceof Error ? error.message : String(error)), updatedAt: Date.now() };
-    } finally {
+    const { signal } = controller;
+    const timedOut = new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+    const timer = setTimeout(() => controller.abort(new Error("quota query timed out")), FETCH_TIMEOUT_MS);
+    const promise = Promise.race([timedOut, Promise.resolve().then(() => {
+      signal.throwIfAborted();
+      return source.fetch(signal);
+    })]).then(
+      (view) => view ?? errorView("empty result"),
+      (error) => errorView(error instanceof Error ? error.message : String(error)),
+    ).then((view) => {
+      if (sources.get(source.id) !== source) return;
       updatedAt = Date.now();
-    }
+      source.snapshot = view.status === "error" && source.snapshot.status === "ok"
+        ? { ...source.snapshot, stale: true, error: view.error }
+        : { ...view, updatedAt };
+    }).finally(() => {
+      clearTimeout(timer);
+      inFlight.delete(source);
+    });
+    inFlight.set(source, { controller, promise });
+    return promise;
   }
   function list() {
     return [...sources.values()]
@@ -259,9 +293,7 @@ export function apply(ctx, config) {
     return list();
   }
   async function refreshAll() {
-    if (refreshing) return;
-    refreshing = true;
-    try { await refresh(); } finally { refreshing = false; }
+    await refresh();
   }
 
   // -- public service -------------------------------------------------------
@@ -279,7 +311,7 @@ export function apply(ctx, config) {
   });
   ctx.provide("providerQuota", registry);
 
-  ctx.effect(() => () => { sources.clear(); updatedAt = Date.now(); }, "provider-quota: registry lifetime");
+  ctx.effect(() => () => { for (const id of sources.keys()) remove(id); }, "provider-quota: registry lifetime");
 
   // -- owned-source reconciliation -----------------------------------------
 
@@ -340,7 +372,7 @@ export function apply(ctx, config) {
         desired.set(`provider:${name}`, {
           id: `provider:${name}`, label: conf?.displayName || name, order: 0,
           localProvider: isQwenProvider(name, conf) ? name : undefined,
-          fetch: () => fetchProviderBalance(name, conf),
+          fetch: (signal) => fetchProviderBalance(name, conf, signal),
         });
       }
       for (const p of providers) {
@@ -357,7 +389,7 @@ export function apply(ctx, config) {
             id: `provider:${p.id}`, label: p.name || p.id, order: 0,
             fetch: isAccount
               ? () => fetchAccountBalance()
-              : () => fetchProviderBalance(p.id, { baseURL: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY" }),
+              : (signal) => fetchProviderBalance(p.id, { baseURL: "https://api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY" }, signal),
           });
         }
       }
@@ -374,10 +406,10 @@ export function apply(ctx, config) {
 
   // -- quota fetchers -------------------------------------------------------
 
-  async function fetchFactoryQuota() {
+  async function fetchFactoryQuota(signal) {
     const origin = ctx.get("webServer")?.getOrigin?.();
     if (!origin) return errorView("no web origin");
-    const { ok, data, status } = await fetchJson(`${origin}/api/dsh-factory-provider/quota`);
+    const { ok, data, status } = await fetchJson(`${origin}/api/dsh-factory-provider/quota`, { signal });
     if (status === 404) return { status: "unsupported", detail: "factory plugin removed" };
     if (!ok || !data) return errorView(`factory quota HTTP ${status}`);
     if (data.ok === false) return errorView(data.message ?? data.code ?? "factory quota error");
@@ -399,7 +431,7 @@ export function apply(ctx, config) {
     return { status: "client-fetch", provider };
   }
 
-  async function fetchProviderBalance(name, conf) {
+  async function fetchProviderBalance(name, conf, signal) {
     const baseURL = String(conf?.baseURL ?? "");
     // Qwen Token Plan: no public API-key balance endpoint. Show locally-tracked
     // DSH token usage plus a link to the console for the real remaining Credits.
@@ -408,9 +440,11 @@ export function apply(ctx, config) {
       return { status: "unsupported", detail: "no balance API" };
     }
     const key = await resolveApiKey(conf);
+    signal.throwIfAborted();
     if (!key) return { status: "unsupported", detail: "no API key configured" };
     const root = baseURL.replace(/\/+$/, "").replace(/\/v1$/, "");
     const { ok, data, status } = await fetchJson(`${root}/user/balance`, {
+      signal,
       headers: { authorization: `Bearer ${key}`, accept: "application/json" },
     });
     if (!ok || !data) return errorView(`balance HTTP ${status}`);
@@ -498,92 +532,62 @@ export function apply(ctx, config) {
     return () => { disposed = true; usageEpoch++; off(); persistUsage(); };
   }, "provider-quota: usage observer");
 
-  // -- HTTP routes for the Client ------------------------------------------
-  const webServer = ctx.get("webServer");
-  if (webServer) {
-    const guarded = (handler) => (req, res) => {
-      // These raw routes do not inherit DSH RPC admission. Restrict them to
-      // the local GUI origin; reject cross-site writes and DNS-rebinding hosts.
-      let origin;
-      try { origin = new URL(webServer.getOrigin()); } catch { /* fail closed */ }
-      const headers = req.headers ?? {};
-      const sameOrigin = origin && headers.origin === origin.origin;
-      const trusted = isLoopback(req) && origin && headers.host === origin.host
-        && (!headers.origin || sameOrigin)
-        && (!headers["sec-fetch-site"] || ["same-origin", "none"].includes(headers["sec-fetch-site"]));
-      if (!trusted || (req.method === "POST" && !sameOrigin)) {
-        replyJson(res, 403, { ok: false, error: { message: "local same-origin requests only" } }); return;
-      }
-      if (req.method === "POST" && String(headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() !== "application/json") {
-        replyJson(res, 415, { ok: false, error: { message: "application/json required" } }); return;
-      }
-      return handler(req, res);
-    };
-    const readBody = (req) => new Promise((resolve) => {
-      let body = "";
-      req.on("data", (c) => { body += c; if (body.length > 1e6) req.destroy(); });
-      req.on("end", () => { try { resolve(body ? JSON.parse(body) : {}); } catch { resolve(null); } });
-      req.on("error", () => resolve(null));
-    });
-    const routes = [
-      {
-        kind: "exact", path: `${ROUTE_PREFIX}/list`,
-        handler: guarded((req, res) => {
-          if (req.method !== "GET" && req.method !== "HEAD") { replyJson(res, 405, { ok: false, error: { message: "GET only" } }); return; }
-          replyJson(res, 200, { ok: true, value: { sources: list(), updatedAt, prefs } });
-        }),
+  // Use Connection's owner-only Fetch routes. Electron's dsh-app bridge
+  // forwards the authenticated Cookie but strips Origin and Sec-Fetch-Site.
+  // Browser admission stays with DSH; never allow anonymous origin-less writes.
+  const connection = ctx.get("connection");
+  const snapshot = () => ({ sources: list(), updatedAt, prefs });
+  function route(path, methods, handler) {
+    connection.fetch.register({
+      path: `${ROUTE_PREFIX}${path}`, methods, requestBody: "buffered",
+      async fetch(request) {
+        if (request.method === "POST" && request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+          return apiError(415, "application/json required");
+        }
+        return handler(request);
       },
-      {
-        kind: "exact", path: `${ROUTE_PREFIX}/refresh`,
-        handler: guarded(async (req, res) => {
-          if (req.method !== "POST") { replyJson(res, 405, { ok: false, error: { message: "POST only" } }); return; }
-          await syncSources();
-          await refreshAll();
-          replyJson(res, 200, { ok: true, value: { sources: list(), updatedAt, prefs } });
-        }),
-      },
-      {
-        kind: "exact", path: `${ROUTE_PREFIX}/prefs`,
-        handler: guarded(async (req, res) => {
-          if (req.method === "GET") { replyJson(res, 200, { ok: true, value: prefs }); return; }
-          if (req.method !== "POST") { replyJson(res, 405, { ok: false, error: { message: "GET/POST only" } }); return; }
-          const body = await readBody(req);
-          if (!body || typeof body !== "object") { replyJson(res, 400, { ok: false, error: { message: "invalid prefs body" } }); return; }
-          if (body.refreshSeconds !== undefined) prefs.refreshSeconds = Math.min(3600, Math.max(5, Number(body.refreshSeconds) || 60));
-          if (typeof body.bridgeFactory === "boolean") prefs.bridgeFactory = body.bridgeFactory;
-          if (typeof body.bridgeSubscriptions === "boolean") prefs.bridgeSubscriptions = body.bridgeSubscriptions;
-          if (typeof body.queryProviders === "boolean") prefs.queryProviders = body.queryProviders;
-          if (typeof body.trackUsage === "boolean" && prefs.trackUsage !== body.trackUsage) {
-            usageEpoch++;
-            prefs.trackUsage = body.trackUsage;
-            updatedAt = Date.now();
-          }
-          if (body.hidden && typeof body.hidden === "object") prefs.hidden = { ...body.hidden };
-          savePrefs();
-          startLoop();
-          await syncSources();
-          replyJson(res, 200, { ok: true, value: prefs });
-        }),
-      },
-      {
-        kind: "exact", path: `${ROUTE_PREFIX}/usage/reset`,
-        handler: guarded(async (req, res) => {
-          if (req.method !== "POST") { replyJson(res, 405, { ok: false, error: { message: "POST only" } }); return; }
-          usageEpoch++;
-          usage = Object.create(null);
-          usageDirty = true;
-          updatedAt = Date.now();
-          const saved = persistUsage();
-          // No network refresh is needed: list() projects local counters live.
-          replyJson(res, saved ? 200 : 500, saved ? { ok: true } : {
-            ok: false, error: { message: "failed to persist usage reset; will retry" },
-          });
-        }),
-      },
-    ];
-    ctx.effect(() => {
-      const disposers = routes.map((r) => webServer.register(r)).filter((d) => typeof d === "function");
-      return () => { for (const d of disposers) { try { d(); } catch {} } };
-    }, "provider-quota: http routes");
+    }); // Connection binds the registration's lifetime to this plugin fiber.
   }
+  route("/list", ["GET", "HEAD"], (request) => request.method === "HEAD"
+    ? new Response(null, { headers: { "cache-control": "no-store" } })
+    : replyJson(200, { ok: true, value: snapshot() }));
+  route("/refresh", ["POST"], async () => {
+    await syncSources();
+    await refreshAll();
+    return replyJson(200, { ok: true, value: snapshot() });
+  });
+  route("/prefs", ["GET", "POST"], async (request) => {
+    if (request.method === "GET") return replyJson(200, { ok: true, value: prefs });
+    const body = await readBody(request);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return apiError(400, "invalid prefs body");
+    const next = { ...prefs };
+    if (body.refreshSeconds !== undefined) next.refreshSeconds = Math.min(3600, Math.max(5, Number(body.refreshSeconds) || 60));
+    for (const key of ["bridgeFactory", "bridgeSubscriptions", "queryProviders", "trackUsage"]) {
+      if (typeof body[key] === "boolean") next[key] = body[key];
+    }
+    // Older clients replace the whole map. A switch changes just its id,
+    // so concurrent pages cannot overwrite another item's visibility.
+    if (body.hidden && typeof body.hidden === "object" && !Array.isArray(body.hidden)) next.hidden = { ...body.hidden };
+    if (body.visibility !== undefined) {
+      const { id, visible } = body.visibility ?? {};
+      if (typeof id !== "string" || typeof visible !== "boolean" || body.hidden !== undefined) return apiError(400, "invalid visibility patch");
+      next.hidden = { ...prefs.hidden, [id]: true };
+      if (visible) delete next.hidden[id];
+    }
+    if (!savePrefs(next)) return apiError(500, "failed to persist preferences");
+    const previous = prefs;
+    prefs = next;
+    if (prefs.trackUsage !== previous.trackUsage) { usageEpoch++; updatedAt = Date.now(); }
+    if (prefs.refreshSeconds !== previous.refreshSeconds) startLoop();
+    if (["bridgeFactory", "bridgeSubscriptions", "queryProviders"].some((key) => prefs[key] !== previous[key])) await syncSources();
+    return replyJson(200, { ok: true, value: prefs });
+  });
+  route("/usage/reset", ["POST"], () => {
+    usageEpoch++;
+    usage = Object.create(null);
+    usageDirty = true;
+    updatedAt = Date.now();
+    // No network refresh is needed: list() projects local counters live.
+    return persistUsage() ? replyJson(200, { ok: true }) : apiError(500, "failed to persist usage reset; will retry");
+  });
 }

@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
     const zh = {
       title: "额度", refresh: "刷新", empty: "暂无额度数据", loading: "加载中…",
       unsupported: "不支持查询", error: "查询失败", open: "查看供应商额度",
-      console: "控制台查看", notSignedIn: "未登录",
+      console: "控制台查看", notSignedIn: "未登录", staleQuota: "上次查询结果", quotaRefreshFailed: "刷新失败，显示上次结果",
       settingsTitle: "供应商额度", settingsDesc: "配置额度面板的刷新与显示。",
       refreshInterval: "刷新间隔（秒）", apply: "应用",
       bridges: "数据来源", bridgeFactory: "Factory (Droid) 订阅额度",
@@ -34,7 +34,7 @@ window.__ModuleLoader__.load({
     const en = {
       title: "Quota", refresh: "Refresh", empty: "No quota data", loading: "Loading…",
       unsupported: "Not queryable", error: "Query failed", open: "View provider quota",
-      console: "Open console", notSignedIn: "Not signed in",
+      console: "Open console", notSignedIn: "Not signed in", staleQuota: "Last known quota", quotaRefreshFailed: "Refresh failed; last known quota",
       settingsTitle: "Provider quota", settingsDesc: "Configure refresh and visibility of the quota panel.",
       refreshInterval: "Refresh interval (seconds)", apply: "Apply",
       bridges: "Data sources", bridgeFactory: "Factory (Droid) subscription quota",
@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
 .pq-title{font-size:11px;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary);}
 .pq-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border:none;border-radius:5px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:0;flex:none;}
 .pq-iconbtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);}
+.pq-iconbtn:disabled{opacity:.55;cursor:wait;}
 .pq-rows{display:flex;flex-direction:column;gap:1px;width:100%;max-height:220px;overflow-y:auto;}
 .pq-row{display:grid;grid-template-rows:16px 3px 13px;gap:3px;height:48px;flex:0 0 48px;padding:5px 6px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;overflow:hidden;}
 .pq-row:hover{background:var(--dsw-specific-sidebar-nav-item-hover);}
@@ -72,10 +73,11 @@ window.__ModuleLoader__.load({
 .pq-localval{grid-row:3;min-width:0;width:100%;font-size:10px;line-height:13px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;}
 .pq-bar{grid-row:2;height:3px;border-radius:2px;background:var(--dsw-alias-border-l1);overflow:hidden;width:100%;}
 .pq-bar-fill{height:100%;border-radius:2px;background:var(--dsw-alias-brand-primary);}
-.pq-bar-fill.pq-warn{background:var(--dsw-alias-state-warning-primary);}
+.pq-bar-fill.pq-warn{background:var(--dsw-alias-state-warn-primary,var(--dsw-alias-brand-primary));}
 .pq-bar-fill.pq-hot{background:var(--dsw-alias-state-error-primary);}
 .pq-detail{grid-row:3;line-height:13px;min-width:0;font-size:10px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%;}
 .pq-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:4px 6px;}
+.pq-empty.pq-err{color:var(--dsw-alias-state-error-primary);}
 .pq-railbtn{display:flex;align-items:center;justify-content:center;width:36px;height:32px;margin:0 auto;border:none;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;}
 .pq-railbtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);}
 .pq-pop{position:fixed;z-index:1200;width:min(260px,calc(100vw - 24px));background:var(--dsw-alias-bg-overlay);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);padding:8px;box-sizing:border-box;}
@@ -93,8 +95,9 @@ window.__ModuleLoader__.load({
 .pq-btn:hover{background:var(--dsw-alias-button-primary-hover);}
 .pq-btn:disabled{opacity:.55;cursor:wait;}
 .pq-switch{position:relative;display:inline-block;width:34px;height:20px;flex:none;}
-.pq-switch input{opacity:0;width:0;height:0;}
-.pq-switch .pq-track{position:absolute;inset:0;border-radius:20px;background:var(--dsw-alias-border-l2);transition:background .15s;cursor:pointer;}
+.pq-switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;}
+.pq-switch .pq-track{position:absolute;inset:0;border-radius:20px;background:var(--dsw-alias-border-l2);transition:background .15s;pointer-events:none;}
+.pq-switch input:focus-visible + .pq-track{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;}
 .pq-switch .pq-track:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:var(--dsw-alias-bg-layer-1);transition:transform .15s;}
 .pq-switch input:checked + .pq-track{background:var(--dsw-alias-brand-primary);}
 .pq-switch input:checked + .pq-track:before{transform:translateX(14px);}
@@ -135,7 +138,7 @@ window.__ModuleLoader__.load({
       return `${Math.round(hours / 24)}d`;
     }
     function usageToView(windows) {
-      const usable = (windows ?? []).filter((w) => w && Number.isFinite(Number(w.usedPercent)));
+      const usable = windows.filter((w) => w?.usedPercent != null && w.usedPercent !== "" && Number.isFinite(Number(w.usedPercent)));
       if (usable.length === 0) return { status: "unsupported", detail: "no usage window" };
       const primary = usable.find((w) => w.label === "weekly") ?? usable[0];
       const used = Math.min(100, Math.max(0, Number(primary.usedPercent)));
@@ -147,41 +150,143 @@ window.__ModuleLoader__.load({
     // plugin's own usage badge does: read the account roster from `status`, then
     // call `usage` with the default account key. Requires the browser's
     // authenticated connection RPC (the Host cannot reach this channel).
-    async function resolveSubscriptionUsage(rpc, providers, provider) {
-      if (!providers) return { status: "error", error: "subscription status unavailable" };
-      const state = providers?.[provider];
-      const accounts = (state?.accounts ?? []).slice().sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
-      if (accounts.length === 0) return { status: "not-signed-in" };
+    async function resolveSubscriptionUsage(call, provider, account, force) {
       try {
-        const result = await rpc.call("/api", "subscriptions-auth.usage", { provider, account: accounts[0].key });
+        const result = await call("subscriptions-auth.usage", { provider, account, ...(force ? { force: true } : {}) });
         if (!result || result.ok === false) return { status: "error", error: "usage query rejected" };
         const usage = result.value;
-        if (!usage || usage.supported === false) return { status: "unsupported", detail: usage?.reason ?? "not supported" };
-        const windows = (usage.windows ?? []).map((w) => ({
+        if (!usage) return { status: "error", error: "missing usage result" };
+        if (usage.supported === false) return usage.retryAt || usage.stale
+          ? { status: "error", error: usage.reason ?? "usage unavailable" }
+          : { status: "unsupported", detail: usage.reason ?? "not supported" };
+        const windows = (Array.isArray(usage.windows) ? usage.windows : []).filter(Boolean).map((w) => ({
           label: w.kind === "session" ? "5h" : w.kind === "weekly" ? "weekly" : (w.kind ?? "window"),
           usedPercent: w.usedPercent, resetsAt: w.resetsAt,
         }));
         const view = usageToView(windows);
-        if (view.status === "ok" && usage.credits?.balance !== undefined) view.detail = `${view.detail ?? ""} · credits ${usage.credits.balance}`;
+        if (view.status === "ok") {
+          view.stale = usage.refreshFailed === true || usage.stale === true || (typeof usage.staleAt === "number" && Date.now() >= usage.staleAt);
+          if (usage.refreshFailed === true) view.error = usage.reason ?? "usage refresh failed";
+          if (usage.credits?.balance !== undefined) view.detail = `${view.detail ?? ""} · credits ${usage.credits.balance}`;
+        }
         return view;
       } catch (error) {
         return { status: "error", error: "usage fetch failed" };
       }
     }
-    async function fetchSubscriptionProviders(rpc) {
-      try {
-        const result = await rpc.call("/api", "subscriptions-auth.status", {});
-        return result?.value?.providers ?? result?.providers ?? null;
-      } catch { return null; }
+    // The host list owns membership and ordering; only a persistent, visible
+    // client-fetch entry owns its cached value and in-flight subscription work.
+    function createSubscriptionPoller(setSources) {
+      let list = [];
+      let entries = new Map();
+      const pending = new Set();
+      function publish() {
+        setSources(list.map((s) => {
+          const snapshot = entries.get(s.id)?.snapshot;
+          return snapshot ? { ...s, snapshot } : s;
+        }).filter((s) => s.snapshot?.status !== "not-signed-in"));
+      }
+      async function call(rpc, method, payload) {
+        const controller = new AbortController();
+        // Race cancellation as well as passing the signal: alternative RPC
+        // transports need not settle their promise when aborted.
+        const cancelled = new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("subscription RPC cancelled")), { once: true }));
+        const timer = setTimeout(() => controller.abort(), 60000);
+        pending.add(controller);
+        try { return await Promise.race([cancelled, rpc.call("/api", method, payload, controller.signal)]); }
+        finally { clearTimeout(timer); pending.delete(controller); }
+      }
+      function start(rpc, batch, force = false) {
+        const roster = call(rpc, "subscriptions-auth.status", {}).then(
+          (result) => result?.ok === false ? undefined : result?.value?.providers ?? result?.providers,
+          () => undefined, // A failed roster is not evidence of sign-out.
+        );
+        for (const entry of batch) {
+          entry.forced = force;
+          entry.work = refresh(entry, roster, rpc, force).finally(() => { entry.work = undefined; });
+        }
+      }
+      async function refresh(entry, roster, rpc, force) {
+        const providers = await roster;
+        if (entries.get(entry.id) !== entry) return;
+        const state = providers?.[entry.provider];
+        let snapshot;
+        if (!Array.isArray(state?.accounts) || (!state.accounts.length && state.detail)) {
+          snapshot = { status: "error", error: "subscription status unavailable" };
+        } else if (!state.accounts.length) {
+          entry.account = undefined;
+          snapshot = { status: "not-signed-in" };
+        } else {
+          const account = (state.accounts.find((a) => a?.isDefault) ?? state.accounts[0])?.key;
+          if (entry.account !== account) {
+            // Never attribute a previous account's quota to a new default.
+            entry.account = account;
+            entry.snapshot = undefined;
+            publish();
+          }
+          snapshot = account ? await resolveSubscriptionUsage((method, payload) => call(rpc, method, payload), entry.provider, account, force)
+            : { status: "error", error: "subscription account unavailable" };
+        }
+        if (entries.get(entry.id) !== entry) return;
+        entry.snapshot = snapshot.status === "error" && entry.snapshot?.status === "ok"
+          ? { ...entry.snapshot, stale: true, error: snapshot.error }
+          : snapshot;
+        publish();
+      }
+      return {
+        update(visible) {
+          list = visible;
+          const next = new Map();
+          for (const s of list) {
+            if (s.snapshot?.status !== "client-fetch") continue;
+            const provider = s.snapshot.provider;
+            const old = entries.get(s.id);
+            next.set(s.id, old && old.provider === provider ? old : { id: s.id, provider });
+          }
+          entries = next;
+          publish();
+        },
+        refresh(rpc, forcedEntries) {
+          if (!rpc || entries.size === 0) return;
+          const selected = [...entries.values()].filter((entry) => !forcedEntries?.has(entry));
+          const batch = selected.filter((entry) => !entry.work);
+          if (batch.length) start(rpc, batch, !!forcedEntries);
+          if (!forcedEntries) return;
+          return Promise.all(selected.map((entry) => {
+            forcedEntries.add(entry);
+            if (entry.forced) return entry.work;
+            return entry.work.then(() => {
+              if (entries.get(entry.id) !== entry) return;
+              start(rpc, [entry], true);
+              return entry.work;
+            });
+          }));
+        },
+        dispose() {
+          entries.clear();
+          for (const controller of pending) controller.abort();
+        },
+      };
     }
     const PREFS_EVENT = "provider-quota:changed";
+    let preferenceWrites = Promise.resolve(); // Keep saves ordered across Settings remounts.
+    const isHidden = (hidden, id) => hidden != null && Object.hasOwn(hidden, id) && !!hidden[id];
+
+    async function readSourceList(response) {
+      if (!response.ok) throw new Error("quota request failed");
+      const data = await response.json();
+      if (!data?.ok || !Array.isArray(data.value?.sources)) throw new Error("invalid quota response");
+      return data.value;
+    }
 
     function Row({ source, t }) {
       const s = source.snapshot ?? {};
       let value, detail = null;
       if (s.status === "ok") {
-        value = h("span", { className: "pq-value" }, s.remaining ?? "—");
-        if (s.detail) detail = h("div", { className: "pq-detail", title: s.detail }, s.detail);
+        const note = s.stale ? t(s.error ? "quotaRefreshFailed" : "staleQuota") : null;
+        const summary = [note, s.detail].filter(Boolean).join(" · ");
+        value = h("span", { className: "pq-value", title: summary || undefined }, s.remaining ?? "—");
+        if (summary) detail = h("div", { className: "pq-detail", title: summary }, summary);
       } else if (s.status === "local") {
         const u = s.usage;
         const since = u?.since != null ? new Date(u.since) : null;
@@ -214,70 +319,111 @@ window.__ModuleLoader__.load({
         detail);
     }
 
-    function Panel({ sources, loading, t, onRefresh }) {
+    function Panel({ sources, loading, refreshing, refreshFailed, t, onRefresh }) {
       return h("div", { className: "pq-wrap" },
         h("div", { className: "pq-head" },
           h("span", { className: "pq-title" }, t("title")),
-          h("button", { type: "button", className: "pq-iconbtn", title: t("refresh"), "aria-label": t("refresh"), onClick: onRefresh }, h(RefreshIcon, null))),
+          h("button", { type: "button", className: "pq-iconbtn", title: t(refreshing ? "loading" : "refresh"), "aria-label": t("refresh"), "aria-busy": refreshing, disabled: refreshing, onClick: onRefresh }, h(RefreshIcon, null))),
+        refreshFailed && h("div", { className: "pq-empty pq-err", role: "status" }, t(sources.length ? "quotaRefreshFailed" : "error")),
         loading && sources.length === 0 ? h("div", { className: "pq-empty" }, t("loading"))
-          : sources.length === 0 ? h("div", { className: "pq-empty" }, t("empty"))
+          : sources.length === 0 ? (!refreshFailed && h("div", { className: "pq-empty" }, t("empty")))
           : h("div", { className: "pq-rows" }, sources.map((s) => h(Row, { key: s.id, source: s, t }))));
     }
 
     function QuotaWidget({ wide, t, getRpc }) {
       const [sources, setSources] = useState([]);
       const [loading, setLoading] = useState(true);
+      const [refreshing, setRefreshing] = useState(false);
+      const [refreshFailed, setRefreshFailed] = useState(false);
       const [refreshSeconds, setRefreshSeconds] = useState(60);
       const [open, setOpen] = useState(false);
       const [pos, setPos] = useState({ top: 0, left: 0 });
       const btnRef = useRef(null);
       const popRef = useRef(null);
-      const loadVersion = useRef(0);
+      const session = useRef(null);
+
+      const publishList = useCallback((current) => {
+        setRefreshSeconds(Math.min(3600, Math.max(5, Number(current.prefs?.refreshSeconds) || 60)));
+        current.poller.update(current.sources.filter((s) => !isHidden(current.prefs?.hidden, s.id)));
+      }, []);
+
+      const acceptList = useCallback((current, version, value) => {
+        if (session.current !== current || version < current.applied) return false;
+        // A slow healthy list still advances the view unless a newer one was applied.
+        current.applied = version;
+        current.sources = value.sources;
+        current.prefs = value.prefs;
+        publishList(current);
+        setLoading(false);
+        setRefreshFailed(false);
+        return true;
+      }, [publishList]);
 
       const load = useCallback(async () => {
-        const version = ++loadVersion.current;
+        const current = session.current;
+        if (!current) return;
+        const version = ++current.requested;
         try {
-          const res = await fetch("/api/provider-quota/list", { cache: "no-store" });
-          const data = await res.json();
-          if (version !== loadVersion.current) return;
-          if (!res.ok || !data?.ok || !Array.isArray(data.value?.sources)) return;
-          const list = data.value.sources;
-          setRefreshSeconds(Math.min(3600, Math.max(5, Number(data.value.prefs?.refreshSeconds) || 60)));
-          const hidden = data.value.prefs?.hidden ?? {};
-          const visible = (items) => items.filter((s) => !hidden[s.id] && s.snapshot?.status !== "not-signed-in");
-          // Host snapshots (including local totals) must not wait for subscription RPC.
-          setSources(visible(list));
-          setLoading(false);
-          const rpc = getRpc ? getRpc() : undefined;
-          if (rpc && list.some((s) => s.snapshot?.status === "client-fetch")) {
-            const providers = await fetchSubscriptionProviders(rpc);
-            if (version !== loadVersion.current) return;
-            await Promise.all(list.map(async (s) => {
-              if (s.snapshot?.status !== "client-fetch") return;
-              const snapshot = await resolveSubscriptionUsage(rpc, providers, s.snapshot.provider);
-              if (version !== loadVersion.current) return;
-              setSources((current) => visible(current.map((item) => item.id === s.id ? { ...item, snapshot } : item)));
-            }));
+          const value = await readSourceList(await fetch("/api/provider-quota/list", { cache: "no-store", signal: AbortSignal.timeout(15000) }));
+          if (acceptList(current, version, value) && !current.manual) current.poller.refresh(getRpc?.());
+        } catch {
+          if (session.current === current && version >= current.applied) {
+            setLoading(false);
+            setRefreshFailed(true);
           }
-        } catch { /* keep last state; never throw */ }
-        finally { if (version === loadVersion.current) setLoading(false); }
-      }, [getRpc]);
+        }
+      }, [acceptList, getRpc]);
 
       useEffect(() => {
-        load();
-        const onChanged = () => load();
+        const poller = createSubscriptionPoller(setSources);
+        const current = { poller, requested: 0, applied: 0, sources: [] };
+        session.current = current;
+        const onChanged = (event) => {
+          // A confirmed save is authoritative even if the follow-up GET fails.
+          if (event.detail?.prefs) {
+            current.applied = ++current.requested;
+            current.prefs = event.detail.prefs;
+            publishList(current);
+          }
+          void load();
+        };
+        void load();
         window.addEventListener(PREFS_EVENT, onChanged);
-        return () => { ++loadVersion.current; window.removeEventListener(PREFS_EVENT, onChanged); };
-      }, [load]);
+        return () => { session.current = null; poller.dispose(); window.removeEventListener(PREFS_EVENT, onChanged); };
+      }, [load, publishList]);
       useEffect(() => {
-        const timer = setInterval(load, refreshSeconds * 1000);
+        const timer = setInterval(() => {
+          // Polling while the refresh is in flight could reapply a pre-refresh snapshot.
+          if (!session.current?.manual) void load();
+        }, refreshSeconds * 1000);
         return () => clearInterval(timer);
       }, [load, refreshSeconds]);
 
       const onRefresh = useCallback(async () => {
-        try { await fetch("/api/provider-quota/refresh", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }); } catch {}
-        load();
-      }, [load]);
+        const current = session.current;
+        if (!current || current.manual) return;
+        current.manual = true;
+        const version = ++current.requested;
+        setRefreshing(true);
+        setRefreshFailed(false);
+        const rpc = getRpc?.();
+        const forcedEntries = new Set();
+        const subscriptions = current.poller.refresh(rpc, forcedEntries);
+        try {
+          const value = await readSourceList(await fetch("/api/provider-quota/refresh", { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(20000) }));
+          if (!acceptList(current, version, value) && session.current === current) await load();
+        } catch {
+          if (session.current === current) { setLoading(false); setRefreshFailed(true); }
+        } finally {
+          if (session.current === current) {
+            // Include subscription sources discovered by the Host refresh, without
+            // forcing the same item twice.
+            await Promise.all([subscriptions, current.poller.refresh(rpc, forcedEntries)]);
+          }
+          current.manual = false;
+          if (session.current === current) setRefreshing(false);
+        }
+      }, [acceptList, getRpc, load]);
 
       useEffect(() => {
         if (!open) return;
@@ -298,19 +444,19 @@ window.__ModuleLoader__.load({
         setOpen((v) => !v);
       };
 
-      if (wide) return h("div", { className: "pq-root" }, h(Panel, { sources, loading, t, onRefresh }));
+      if (wide) return h("div", { className: "pq-root" }, h(Panel, { sources, loading, refreshing, refreshFailed, t, onRefresh }));
       return h(React.Fragment, null,
         h("button", { type: "button", ref: btnRef, className: "pq-railbtn", title: t("open"), "aria-label": t("open"), onClick: openPop }, h(GaugeIcon, { size: 18 })),
         open && ReactDOM.createPortal(
           h("div", { className: "pq-pop", ref: popRef, style: { top: pos.top, left: pos.left }, role: "dialog", "aria-label": t("title") },
-            h(Panel, { sources, loading, t, onRefresh })),
+            h(Panel, { sources, loading, refreshing, refreshFailed, t, onRefresh })),
           document.body));
     }
 
     // -- Settings page ------------------------------------------------------
     function Switch({ checked, onChange, label }) {
       return h("label", { className: "pq-switch", title: label },
-        h("input", { type: "checkbox", checked, onChange: (e) => onChange(e.target.checked), "aria-label": label }),
+        h("input", { type: "checkbox", role: "switch", checked, "aria-checked": checked, onChange: (e) => onChange(e.target.checked), "aria-label": label }),
         h("span", { className: "pq-track" }));
     }
 
@@ -320,52 +466,83 @@ window.__ModuleLoader__.load({
       const [intervalDraft, setIntervalDraft] = useState("");
       const [msg, setMsg] = useState(null);
       const [resetting, setResetting] = useState(false);
+      const [pending, setPending] = useState([]);
+      const [loadFailed, setLoadFailed] = useState(false);
+      const [loadAttempt, setLoadAttempt] = useState(0);
+      const failedInBatch = useRef(false);
+      const queuedCount = useRef(0);
+      const mounted = useRef(false);
       const resetPending = useRef(false);
       const msgTimer = useRef(null);
 
-      useEffect(() => () => clearTimeout(msgTimer.current), []);
+      useEffect(() => {
+        mounted.current = true;
+        return () => { mounted.current = false; clearTimeout(msgTimer.current); };
+      }, []);
       const showMessage = (message) => {
         clearTimeout(msgTimer.current);
         setMsg(message);
-        msgTimer.current = setTimeout(() => setMsg(null), 2500);
+        if (message.ok) msgTimer.current = setTimeout(() => setMsg(null), 2500);
       };
 
-      const load = useCallback(async () => {
-        try {
-          const [p, l] = await Promise.all([
-            fetch("/api/provider-quota/prefs", { cache: "no-store" }).then((r) => r.json()),
-            fetch("/api/provider-quota/list", { cache: "no-store" }).then((r) => r.json()),
-          ]);
-          if (p?.ok) { setPrefs(p.value); setIntervalDraft(String(p.value.refreshSeconds ?? 60)); }
-          if (l?.ok) setSources(l.value.sources ?? []);
-        } catch {}
-      }, []);
-      useEffect(() => { load(); }, [load]);
+      useEffect(() => {
+        let live = true;
+        setLoadFailed(false);
+        (async () => {
+          try {
+            await preferenceWrites; // The previous Settings section may have unmounted while saving.
+            if (!live) return;
+            const data = await readSourceList(await fetch("/api/provider-quota/list", { cache: "no-store", signal: AbortSignal.timeout(15000) }));
+            if (!data.prefs) throw new Error("missing preferences");
+            if (!live) return;
+            setPrefs(data.prefs);
+            setSources(data.sources);
+            setIntervalDraft(String(data.prefs.refreshSeconds ?? 60));
+          } catch { if (live) setLoadFailed(true); }
+        })();
+        return () => { live = false; };
+      }, [loadAttempt]);
 
-      const save = useCallback(async (patch) => {
-        try {
-          const res = await fetch("/api/provider-quota/prefs", {
-            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(patch),
-          });
-          const data = await res.json();
-          if (data?.ok) {
-            setPrefs(data.value); showMessage({ ok: true, text: t("saved") });
-            window.dispatchEvent(new CustomEvent(PREFS_EVENT));
+      // Render unacknowledged intents over the last confirmed prefs. Removing
+      // a failed intent rolls back only that switch, not newer user input.
+      const save = (patch) => {
+        if (queuedCount.current++ === 0) failedInBatch.current = false;
+        setPending((items) => [...items, patch]);
+        preferenceWrites = preferenceWrites.then(async () => {
+          try {
+            const res = await fetch("/api/provider-quota/prefs", {
+              method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(patch), signal: AbortSignal.timeout(15000),
+            });
+            const data = await res.json();
+            if (!res.ok || !data?.ok || !data.value?.hidden) throw new Error("save failed");
+            const item = patch.visibility;
+            if (item && item.visible === isHidden(data.value.hidden, item.id)) throw new Error("visibility not applied");
+            if (mounted.current) setPrefs(data.value);
+            window.dispatchEvent(new CustomEvent(PREFS_EVENT, { detail: { prefs: data.value } }));
+          } catch {
+            failedInBatch.current = true;
+            if (mounted.current) showMessage({ ok: false, itemId: patch.visibility?.id, text: t("saveFail") });
+          } finally {
+            queuedCount.current--;
+            if (mounted.current) {
+              setPending((items) => items.filter((item) => item !== patch));
+              if (!queuedCount.current && !failedInBatch.current) showMessage({ ok: true, text: t("saved") });
+            }
           }
-          else showMessage({ ok: false, text: t("saveFail") });
-        } catch { showMessage({ ok: false, text: t("saveFail") }); }
-      }, [t]);
+        });
+        return preferenceWrites;
+      };
 
       const applyInterval = () => {
         const n = Number(intervalDraft);
-        if (!Number.isFinite(n) || n < 5) { setIntervalDraft(String(prefs?.refreshSeconds ?? 60)); return; }
-        save({ refreshSeconds: Math.round(n) });
+        const saved = prefs?.refreshSeconds ?? 60;
+        if (!Number.isFinite(n) || n < 5) { setIntervalDraft(String(saved)); return; }
+        const next = Math.min(3600, Math.round(n));
+        setIntervalDraft(String(next));
+        const latest = pending.findLast((patch) => patch.refreshSeconds !== undefined)?.refreshSeconds ?? saved;
+        if (next !== latest) save({ refreshSeconds: next });
       };
-      const toggleHidden = (id, visible) => {
-        const hidden = { ...(prefs?.hidden ?? {}) };
-        if (visible) delete hidden[id]; else hidden[id] = true;
-        save({ hidden });
-      };
+      const toggleHidden = (id, visible) => save({ visibility: { id, visible } });
       const resetUsage = async () => {
         if (resetPending.current || !window.confirm(t("resetConfirm"))) return;
         resetPending.current = true;
@@ -382,7 +559,15 @@ window.__ModuleLoader__.load({
         finally { resetPending.current = false; setResetting(false); }
       };
 
-      if (!prefs) return h("div", { className: "pq-set" }, h("p", { className: "pq-desc" }, t("loading")));
+      if (!prefs) return h("div", { className: "pq-set" }, loadFailed
+        ? h("div", { role: "alert" }, t("error"), " ", h("button", { className: "pq-btn", type: "button", onClick: () => setLoadAttempt((n) => n + 1) }, t("refresh")))
+        : h("p", { className: "pq-desc" }, t("loading")));
+      const draft = { ...prefs };
+      const hidden = Object.assign(Object.create(null), prefs.hidden);
+      for (const patch of pending) {
+        if (patch.visibility) hidden[patch.visibility.id] = !patch.visibility.visible;
+        else Object.assign(draft, patch);
+      }
 
       return h("div", { className: "pq-set" },
         h("div", null,
@@ -403,20 +588,20 @@ window.__ModuleLoader__.load({
           h("h3", null, t("bridges")),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("bridgeFactory")),
-            h(Switch, { checked: !!prefs.bridgeFactory, onChange: (v) => save({ bridgeFactory: v }), label: t("bridgeFactory") })),
+            h(Switch, { checked: !!draft.bridgeFactory, onChange: (v) => save({ bridgeFactory: v }), label: t("bridgeFactory") })),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("bridgeSubscriptions")),
-            h(Switch, { checked: !!prefs.bridgeSubscriptions, onChange: (v) => save({ bridgeSubscriptions: v }), label: t("bridgeSubscriptions") })),
+            h(Switch, { checked: !!draft.bridgeSubscriptions, onChange: (v) => save({ bridgeSubscriptions: v }), label: t("bridgeSubscriptions") })),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("queryProviders")),
-            h(Switch, { checked: !!prefs.queryProviders, onChange: (v) => save({ queryProviders: v }), label: t("queryProviders") }))),
+            h(Switch, { checked: !!draft.queryProviders, onChange: (v) => save({ queryProviders: v }), label: t("queryProviders") }))),
 
         h("div", { className: "pq-set-group" },
           h("h3", null, t("usageTitle")),
           h("p", { className: "pq-desc" }, t("usageDesc")),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("trackUsage")),
-            h(Switch, { checked: !!prefs.trackUsage, onChange: (v) => save({ trackUsage: v }), label: t("trackUsage") })),
+            h(Switch, { checked: !!draft.trackUsage, onChange: (v) => save({ trackUsage: v }), label: t("trackUsage") })),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("usageTitle")),
             h("button", { type: "button", className: "pq-btn", disabled: resetting, "aria-busy": resetting, onClick: resetUsage }, t(resetting ? "resetting" : "reset")))),
@@ -426,9 +611,10 @@ window.__ModuleLoader__.load({
           sources.length === 0 ? h("p", { className: "pq-desc" }, t("noSources"))
             : sources.map((s) => h("div", { className: "pq-set-row", key: s.id },
                 h("span", { className: "pq-k", title: s.label }, s.label),
-                h(Switch, { checked: !(prefs.hidden ?? {})[s.id], onChange: (v) => toggleHidden(s.id, v), label: s.label })))),
+                msg?.itemId === s.id && h("span", { className: "pq-msg pq-err", role: "alert" }, t("saveFail")),
+                h(Switch, { checked: !hidden[s.id], onChange: (v) => toggleHidden(s.id, v), label: s.label })))),
 
-        msg ? h("span", { className: "pq-msg" + (msg.ok ? "" : " pq-err") }, msg.text) : null);
+        msg && msg.itemId === undefined ? h("span", { className: "pq-msg" + (msg.ok ? "" : " pq-err"), role: msg.ok ? "status" : "alert" }, msg.text) : null);
     }
 
     return {

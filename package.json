@@ -9,7 +9,7 @@
     "check": "node --check index.js && node --check client.js",
     "prepublishOnly": "npm run check && npm test"
   },
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Shows each model provider's remaining quota above the account row in the DeepSeek Harness left sidebar. Aggregates DSH-configured providers, bridges factory/subscription plugin quota, and tracks Qwen DSH token usage locally. A plugin's rows disappear automatically when it is removed.",
   "type": "module",
   "license": "MIT",

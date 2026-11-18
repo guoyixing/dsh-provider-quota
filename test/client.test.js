@@ -70,8 +70,8 @@ function client(t, options = {}) {
     head: { appendChild(tag) { styles.push(tag); } },
   };
   runInNewContext(source, {
-    window, document,
-    CustomEvent: class { constructor(type) { this.type = type; } },
+    window, document, AbortController, AbortSignal,
+    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
     setInterval(callback, delay) { const id = {}; intervals.set(id, { callback, delay }); return id; },
     clearInterval(id) { intervals.delete(id); },
     setTimeout(callback, delay) { const id = {}; timeouts.set(id, { callback, delay }); return id; },
@@ -132,8 +132,8 @@ function client(t, options = {}) {
     timeouts.clear();
     slots.clear();
   });
-  return { definition, plugin, slots, mount, render, intervals, requests, rpcCalls, state, styles, confirmations, dispatched,
-    changed: () => window.dispatchEvent({ type: "provider-quota:changed" }),
+  return { definition, plugin, slots, mount, render, intervals, timeouts, requests, rpcCalls, state, styles, confirmations, dispatched,
+    changed: (prefs) => window.dispatchEvent({ type: "provider-quota:changed", detail: prefs ? { prefs } : undefined }),
   };
 }
 
@@ -149,6 +149,59 @@ test("client module registers the scoped id, sidebar widget, settings and remova
   assert.equal(app.plugin.inject.join(","), "slots,locale,connection");
   assert.deepEqual([...app.slots.keys()], ["sidebar.footer.action", "settings.section"]);
   assert.equal(app.styles[0].dataset.plugin, "@keyboard-dog/dsh-provider-quota");
+});
+
+test("slow subscription usage survives polling and a click queues one forced check", async (t) => {
+  let finish;
+  let usageCalls = 0;
+  const app = client(t, { refreshSeconds: 5, rpc: async (_path, method, payload) => {
+    if (method.endsWith(".status")) return { ok: true, value: { providers: { codex: { accounts: [{ key: "main" }] } } } };
+    if (++usageCalls === 1) return new Promise((resolve) => { finish = resolve; });
+    assert.equal(payload.force, true);
+    return { ok: true, value: { supported: true, windows: [{ kind: "weekly", usedPercent: 40 }] } };
+  } });
+  app.mount();
+  await flush();
+  const timer = [...app.intervals.values()][0];
+  for (let i = 0; i < 3; i++) { timer.callback(); await flush(); }
+  assert.equal(usageCalls, 1);
+  const manual = panel(app.render()).props.onRefresh();
+  await flush();
+  assert.equal(usageCalls, 1);
+  assert.equal(panel(app.render()).props.refreshing, true);
+  finish({ ok: true, value: { supported: true, windows: [{ kind: "weekly", usedPercent: 25 }] } });
+  await manual;
+  assert.equal(usageCalls, 2);
+  assert.equal(panel(app.render()).props.sources[0].snapshot.remaining, "60%");
+  assert.equal(panel(app.render()).props.refreshing, false);
+});
+
+test("a timed-out subscription keeps the last quota marked stale and the next poll recovers", async (t) => {
+  let usageCalls = 0;
+  const app = client(t, { rpc: async (_path, method) => {
+    if (method.endsWith(".status")) return { ok: true, value: { providers: { codex: { accounts: [{ key: "main" }] } } } };
+    if (++usageCalls === 2) return new Promise(() => {});
+    return { ok: true, value: { supported: true, windows: [{ kind: "weekly", usedPercent: usageCalls * 10 }] } };
+  } });
+  app.mount();
+  await flush();
+  assert.equal(panel(app.render()).props.sources[0].snapshot.remaining, "90%");
+  app.changed();
+  await flush();
+  assert.equal(panel(app.render()).props.sources[0].snapshot.remaining, "90%");
+  const timeout = [...app.timeouts.values()].find(({ delay }) => delay === 60000);
+  assert.ok(timeout);
+  timeout.callback();
+  await flush();
+  const stale = panel(app.render()).props.sources[0].snapshot;
+  assert.equal(stale.stale, true);
+  assert.ok(stale.error);
+  assert.equal(stale.remaining, "90%");
+  app.changed();
+  await flush();
+  const fresh = panel(app.render()).props.sources[0].snapshot;
+  assert.equal(fresh.stale, false);
+  assert.equal(fresh.remaining, "70%");
 });
 
 test("subscription status selects the default account and configured interval replaces default", async (t) => {
@@ -426,4 +479,126 @@ test("failed host refresh preserves already displayed local snapshots", async (t
   app.changed();
   await flush();
   assert.equal(panel(app.render()).props.sources[0].snapshot.usage.total, 1500);
+});
+
+test("confirmed visibility takes effect before a follow-up list response, even if it fails", async (t) => {
+  const stale = deferred();
+  let calls = 0;
+  const app = client(t, { sources: [localSource()], fetch: (url) => {
+    if (!url.endsWith("/list")) return;
+    if (++calls === 2) return stale.promise;
+    if (calls >= 3) return { ok: false };
+  } });
+  app.mount();
+  await flush();
+  app.changed(); // Poll begins with the old visibility.
+  await flush();
+  app.changed({ ...app.state.prefs, hidden: { [app.state.sources[0].id]: true } });
+  assert.equal(panel(app.render()).props.sources.length, 0);
+  await flush();
+  stale.resolve({ ok: true, json: async () => ({ ok: true, value: app.state }) });
+  await flush();
+  assert.equal(panel(app.render()).props.sources.length, 0);
+  app.changed(app.state.prefs);
+  assert.equal(panel(app.render()).props.sources.length, 1);
+  await flush();
+});
+
+test("manual refresh renders the returned quota snapshot without depending on a second GET", async (t) => {
+  const balance = (usedPercent) => ({ id: "quota", label: "Quota", snapshot: { status: "ok", usedPercent, remaining: `${100 - usedPercent}%` } });
+  let lists = 0;
+  const app = client(t, { sources: [balance(0)], fetch: (url, _init, state) => {
+    if (url.endsWith("/list")) {
+      if (++lists > 1) return { ok: false };
+      return;
+    }
+    if (url.endsWith("/refresh")) return { ok: true, json: async () => ({ ok: true, value: { prefs: state.prefs, sources: [balance(75)] } }) };
+  } });
+  app.mount();
+  await flush();
+  await panel(app.render()).props.onRefresh();
+  const view = panel(app.render());
+  assert.equal(view.props.refreshFailed, false);
+  assert.equal(view.props.sources[0].snapshot.remaining, "25%");
+  const row = nodes(view.type(view.props)).find((node) => node.props.source);
+  const fill = nodes(row.type(row.props)).find((node) => node.props.className === "pq-bar-fill pq-warn");
+  assert.equal(fill.props.style.width, "75%");
+  assert.match(app.styles[0].textContent, /\.pq-warn\{background:var\(--dsw-alias-state-warn-primary,/);
+  assert.equal(lists, 1);
+});
+
+function itemSwitch(app, label) {
+  const component = nodes(app.render()).find((node) => node.props.label === label);
+  return nodes(component.type(component.props)).find((node) => node.props.role === "switch");
+}
+
+test("rapid visibility switches stay responsive and save only their own item in click order", async (t) => {
+  const first = deferred();
+  const patches = [];
+  const sources = [{ id: "a", label: "A" }, { id: "constructor", label: "B" }];
+  const app = client(t, { sources, fetch: async (url, init, state) => {
+    if (!url.endsWith("/prefs") || init.method !== "POST") return;
+    assert.equal(init.headers["content-type"], "application/json");
+    const patch = JSON.parse(init.body);
+    patches.push(patch);
+    if (patches.length === 1) await first.promise;
+    const { id, visible } = patch.visibility;
+    const hidden = { ...state.prefs.hidden, [id]: true };
+    if (visible) delete hidden[id];
+    state.prefs = { ...state.prefs, hidden };
+    return { ok: true, json: async () => ({ ok: true, value: state.prefs }) };
+  } });
+  app.mount("settings.section");
+  await flush();
+  assert.equal(itemSwitch(app, "B").props.checked, true);
+  itemSwitch(app, "A").props.onChange({ target: { checked: false } });
+  itemSwitch(app, "B").props.onChange({ target: { checked: false } });
+  assert.equal(itemSwitch(app, "A").props.checked, false);
+  assert.equal(itemSwitch(app, "B").props.checked, false);
+  itemSwitch(app, "A").props.onChange({ target: { checked: true } });
+  await flush();
+  assert.equal(patches.length, 1);
+  assert.equal(itemSwitch(app, "A").props.checked, true);
+  first.resolve();
+  await flush();
+  assert.deepEqual(patches, [
+    { visibility: { id: "a", visible: false } }, { visibility: { id: "constructor", visible: false } },
+    { visibility: { id: "a", visible: true } },
+  ]);
+  assert.deepEqual(app.state.prefs.hidden, { constructor: true });
+  assert.equal(app.dispatched.length, 3);
+});
+
+test("a failed visibility save rolls back only that item and later success does not hide its error", async (t) => {
+  const first = deferred();
+  const app = client(t, { sources: [{ id: "a", label: "A" }, { id: "b", label: "B" }], fetch: async (url, init, state) => {
+    if (!url.endsWith("/prefs") || init.method !== "POST") return;
+    if (JSON.parse(init.body).visibility.id === "a") return first.promise;
+    state.prefs = { ...state.prefs, hidden: { b: true } };
+    return { ok: true, json: async () => ({ ok: true, value: state.prefs }) };
+  } });
+  app.mount("settings.section");
+  await flush();
+  itemSwitch(app, "A").props.onChange({ target: { checked: false } });
+  itemSwitch(app, "B").props.onChange({ target: { checked: false } });
+  first.resolve({ ok: false, json: async () => ({ ok: true, value: { hidden: { a: true } } }) });
+  await flush();
+  assert.equal(itemSwitch(app, "A").props.checked, true);
+  assert.equal(itemSwitch(app, "B").props.checked, false);
+  const row = nodes(app.render()).find((node) => node.props.className === "pq-set-row"
+    && node.props.children.some((child) => child?.props?.label === "A"));
+  assert.equal(nodes(row).find((node) => node.props.role === "alert").props.children[0], "saveFail");
+  assert.deepEqual(app.dispatched, ["provider-quota:changed"]);
+});
+
+test("settings can retry a failed list load instead of remaining on the spinner", async (t) => {
+  let ok = false;
+  const app = client(t, { fetch: (url) => !ok && url.endsWith("/list") ? { ok: false, json: async () => ({ ok: false }) } : undefined });
+  app.mount("settings.section");
+  await flush();
+  ok = true;
+  nodes(app.render()).find((node) => node.type === "button" && node.props.children[0] === "refresh").props.onClick();
+  app.render();
+  await flush();
+  assert.equal(itemSwitch(app, "Codex").props.checked, true);
 });
