@@ -532,6 +532,54 @@ function itemSwitch(app, label) {
   return nodes(component.type(component.props)).find((node) => node.props.role === "switch");
 }
 
+test("Magpie rows show localized stale details and hide each pool independently", async (t) => {
+  for (const locale of ["en", "zh"]) {
+    await t.test(locale, async (t) => {
+      const gemini = { id: "plugin:magpie:gateway:account:gemini", label: "Magpie · agy-cli (Gemini)", snapshot: {
+        status: "ok", remaining: "23%", usedPercent: 77, account: "me@example.test", stale: true,
+        detail: "5h 23% · 7d 99% · ↻2h", tooltip: "5h 23% ↻2026-11-19 11:30Z · 7d 99% ↻2026-11-26 11:30Z", error: "Forbidden", errorKey: "magpieAuth403",
+      } };
+      const other = { id: "plugin:magpie:gateway:account:other", label: "Magpie · agy-cli (Claude)", snapshot: { status: "error", errorKey: "magpieUpstreamError" } };
+      const app = client(t, { locale, sources: [gemini, other] });
+      app.mount();
+      await flush();
+      const [first, second] = rows(app);
+      assert.match(text(first), /23%/);
+      const detailNode = nodes(first).find((node) => node.props.className === "pq-detail");
+      assert.doesNotMatch(text(detailNode), /me@example\.test/);
+      assert.match(text(detailNode), /5h 23% · 7d 99% · ↻2h/);
+      const tooltip = detailNode.props.title;
+      assert.match(tooltip, /5h 23% ↻2026-11-19 11:30Z.*7d 99% ↻2026-11-26 11:30Z/);
+      assert.match(tooltip, locale === "zh" ? /刷新失败.*账号: me@example.test.*查询额度（HTTP 403）/ : /Refresh failed.*Account: me@example.test.*denied quota access \(HTTP 403\)/);
+      const failure = nodes(second).find((node) => node.props.className === "pq-value pq-err");
+      assert.match(failure.props.title, locale === "zh" ? /未能读取此账号/ : /could not read quota/);
+      app.state.prefs.hidden = { [gemini.id]: true };
+      app.changed(app.state.prefs);
+      await flush();
+      assert.deepEqual(Array.from(panel(app.render()).props.sources, (s) => s.id), [other.id]);
+      assert.equal(app.rpcCalls.length, 0);
+    });
+  }
+});
+
+test("Magpie settings switch is localized, enabled by default and saves the independent preference", async (t) => {
+  for (const [locale, label] of [["en", "Magpie gateway quota"], ["zh", "Magpie 网关额度"]]) {
+    await t.test(locale, async (t) => {
+      const app = client(t, { locale, sources: [], fetch: (url, init, state) => {
+        if (url.endsWith("/prefs") && init.method === "POST") Object.assign(state.prefs, JSON.parse(init.body));
+      } });
+      app.mount("settings.section");
+      await flush();
+      assert.equal(itemSwitch(app, label).props.checked, true);
+      await itemSwitch(app, label).props.onChange({ target: { checked: false } });
+      const save = app.requests.find((r) => r.url.endsWith("/prefs"));
+      assert.deepEqual(JSON.parse(save.init.body), { bridgeMagpie: false });
+      assert.equal(itemSwitch(app, label).props.checked, false);
+      assert.equal(app.state.prefs.bridgeMagpie, false);
+    });
+  }
+});
+
 test("rapid visibility switches stay responsive and save only their own item in click order", async (t) => {
   const first = deferred();
   const patches = [];

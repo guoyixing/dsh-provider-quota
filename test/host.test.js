@@ -40,6 +40,7 @@ async function harness(t, options = {}) {
   }
   env("DSH_HOME", home);
   env("DEEPSEEK_API_KEY", undefined);
+  env("TEST_MAGPIE_GATEWAY_KEY", undefined);
   const intervals = new Map();
   t.mock.method(globalThis, "setInterval", (callback, delay) => {
     const handle = {};
@@ -79,6 +80,7 @@ async function harness(t, options = {}) {
         },
       }],
     ]);
+    if (options.credentials) services.set("credentials", options.credentials);
     ctx.get = (key) => services.get(key);
     ctx.provide = (key, value) => services.set(key, value);
     ctx.logger = { warn() {} };
@@ -269,6 +271,262 @@ test("reconciles configured providers and subscriptions on adapters-updated", as
   ctx.emit("llm/adapters-updated");
   await flush();
   assert.deepEqual(ids(ctx), ["custom:keep"]);
+});
+
+const magpieInfo = { name: "magpie", apis: ["/v1/chat/completions", "/v1/magpie/quotas"] };
+const quotas = (...data) => Response.json({ object: "list", data });
+
+test("Magpie verifies normalized roots anonymously and deduplicates aliases per gateway", async (t) => {
+  const local = "http://127.0.0.1:4567";
+  const ipv6 = "http://[::1]:9876";
+  const remote = "https://relay.example:8443/proxy/nested";
+  const roots = [local, ipv6, remote];
+  const resolved = [];
+  const probed = new Set();
+  const { ctx, fetchCalls } = await harness(t, {
+    config: {
+      anthropic: { baseURL: local }, openai: { baseURL: `${local}/v1///` },
+      another: { baseURL: `${ipv6}///` },
+      "magpie-anthropic": { baseURL: `${remote}/`, apiKeyEnv: "EMPTY" },
+      openaiRemote: { baseURL: `${remote}/v1`, apiKeyEnv: "PER_ROUTE" },
+      external: { baseURL: "https://external.example:3425/v1", apiKeyEnv: "MUST_NOT_RESOLVE" },
+      looksLocal: { baseURL: "https://127.unrelated.example/v1" },
+      "magpie-userinfo": { baseURL: "https://user:password@extra.example/v1" },
+      "magpie-query": { baseURL: "https://extra.example/v1?token=abc" },
+    },
+    credentials: { resolve: async (envName) => {
+      resolved.push(envName);
+      assert.ok(probed.has(remote));
+      return envName === "PER_ROUTE" ? { value: "test-gateway-key" } : undefined;
+    } },
+    fetch: async (url, init) => {
+      const root = roots.find((root) => url === `${root}/` || url === `${root}/v1/magpie/quotas`);
+      assert.ok(root, url);
+      assert.equal(init.method, "GET");
+      assert.equal(init.redirect, "error");
+      assert.equal(init.headers.accept, "application/json");
+      if (url.endsWith("/")) {
+        assert.equal(init.headers.authorization, undefined);
+        probed.add(root);
+        return Response.json(magpieInfo);
+      }
+      assert.equal(init.headers.authorization, root === remote ? "Bearer test-gateway-key" : undefined);
+      return quotas({ provider: "paid", kind: "balance", balance: "$12.34" });
+    },
+  });
+  assert.equal(fetchCalls.length, 6);
+  assert.deepEqual(resolved, ["EMPTY", "PER_ROUTE"]);
+  assert.deepEqual(ids(ctx).filter((id) => id.startsWith("provider:")), ["provider:external", "provider:looksLocal", "provider:magpie-query", "provider:magpie-userinfo"]);
+  const magpie = ctx.registry.list().filter((s) => s.id.startsWith("plugin:magpie:"));
+  assert.equal(magpie.length, 3);
+  assert.equal(new Set(magpie.map((s) => s.id)).size, 3);
+  assert.ok(magpie.every((s) => s.snapshot.remaining === "$12.34"));
+  await Promise.all([ctx.registry.refresh(magpie[0].id), ctx.registry.refreshAll()]);
+  for (const root of roots) {
+    assert.equal(fetchCalls.filter((r) => r.url === `${root}/`).length, 1);
+    assert.equal(fetchCalls.filter((r) => r.url === `${root}/v1/magpie/quotas`).length, 2);
+  }
+});
+
+test("Magpie requires both discovery markers and caches negative probes", async (t) => {
+  const noApi = "http://localhost:4567";
+  const wrongName = "https://wrong.example";
+  const redirected = "https://redirect.example";
+  const { ctx, fetchCalls } = await harness(t, {
+    config: {
+      other: { baseURL: `${noApi}/v1` },
+      branded: { baseURL: wrongName, displayName: "Magpie test", apiKeyEnv: "DO_NOT_READ" },
+      "magpie-hop": { baseURL: redirected },
+    },
+    credentials: { resolve: () => assert.fail("unverified gateway must not resolve a key") },
+    fetch: async (url, init) => {
+      assert.equal(init.redirect, "error");
+      assert.equal(init.headers.authorization, undefined);
+      if (url === `${noApi}/`) return Response.json({ name: "magpie", apis: ["/v1/models"] });
+      if (url === `${wrongName}/`) return Response.json({ ...magpieInfo, name: "other" });
+      assert.equal(url, `${redirected}/`);
+      return new Response(null, { status: 302, headers: { location: "https://unrelated.example/" } });
+    },
+  });
+  await request(ctx, "/refresh", { method: "POST" });
+  assert.equal(fetchCalls.length, 3);
+  assert.deepEqual(ids(ctx), ["provider:branded", "provider:magpie-hop", "provider:other"]);
+  assert.ok(ctx.registry.list().every((s) => s.snapshot.status === "unsupported"));
+});
+
+test("Magpie groups real subscription windows and retains stable per-pool visibility", async (t) => {
+  const gateway = "https://example.test";
+  const item = { provider: "agy-cli", name: "agy-cli", kind: "subscription", user: "example@example.test", readAt: "2026-11-19T18:35:25.633812+08:00", windows: [
+    { name: "Gemini · 7 days", used: 1.66639, remaining: 98.33361, resetsAt: "2026-11-26T10:24:28Z", pool: "Gemini", holdsWhy: "low" },
+    { name: "Gemini · 5 hours", used: 3.33236, remaining: 96.66764, resetsAt: "2026-11-19T15:24:28Z", pool: "Gemini", holdsWhy: "low" },
+    { name: "Claude & GPT · Weekly", used: 0, remaining: 100, resetsAt: "2026-11-26T10:35:27Z", pool: "Claude & GPT" },
+    { name: "Claude & GPT · 5 hours", used: 0, remaining: 100, resetsAt: "2026-11-19T15:35:27Z", pool: "Claude & GPT" },
+    { name: "Gemini 4 Argon · 7 days", used: 0, remaining: 100, resetsAt: "2026-11-26T10:35:27Z", pool: "Gemini 4 Argon" },
+  ] };
+  const unpooled = { provider: "plan", kind: "plan", user: "other@example.test", windows: [
+    { name: "valid used", used: "25", remaining: null }, { name: "invalid", used: true }, { name: "shorter", remaining: 50, resetsAt: "invalid" },
+  ] };
+  let data = [item, unpooled];
+  const { ctx, state } = await harness(t, {
+    config: { test: { baseURL: gateway, apiKeyEnv: "MAGPIE_GATEWAY_KEY" } },
+    fetch: async (url) => url.endsWith("/") ? Response.json(magpieInfo) : quotas(...data),
+  });
+  const start = ctx.registry.list();
+  const byLabel = new Map(start.map((s) => [s.label, s]));
+  const [claude, gemini, argon, plan] = ["agy-cli (Claude & GPT)", "agy-cli (Gemini)", "agy-cli (Gemini 4 Argon)", "plan"].map((label) => byLabel.get(`Magpie · ${label}`));
+  assert.equal(start.length, 4);
+  assert.deepEqual([claude, gemini, argon, plan].map((s) => s.snapshot.remaining), ["100%", "97%", "100%", "50%"]);
+  assert.ok(Math.abs(gemini.snapshot.usedPercent - 3.33236) < 1e-9);
+  assert.equal(gemini.snapshot.account, item.user);
+  assert.match(gemini.snapshot.detail, /^7d 98% · 5h 97%( · ↻\d+[mhd])?$/);
+  assert.match(gemini.snapshot.tooltip, /^7d 98% ↻2026-11-26 10:24Z · 5h 97% ↻2026-11-19 15:24Z$/);
+  assert.match(claude.snapshot.detail, /^7d 100% · 5h 100%( · ↻\d+[mhd])?$/);
+  assert.match(argon.snapshot.detail, /^7d 100%( · ↻\d+[mhd])?$/);
+  assert.equal(plan.snapshot.detail, "valid used 75% · shorter 50%");
+  assert.ok(!gemini.id.includes(item.user));
+  await request(ctx, "/prefs", { method: "POST", body: { visibility: { id: gemini.id, visible: false } } });
+  data = [unpooled, { ...item, windows: item.windows.toReversed() }];
+  state.config = { "magpie-rename": { baseURL: `${gateway}/v1/` } };
+  const refreshed = (await request(ctx, "/refresh", { method: "POST" })).body.value;
+  assert.deepEqual(refreshed.sources.map((s) => s.id), start.map((s) => s.id));
+  assert.deepEqual(refreshed.prefs.hidden, { [gemini.id]: true });
+  state.config = {};
+  ctx.emit("llm/adapters-updated");
+  assert.deepEqual(ids(ctx), []);
+});
+
+test("Magpie balances and per-account failures keep only matching last known quota", async (t) => {
+  const plan = { provider: "plan", kind: "subscription", user: "plan@example.test" };
+  const credit = { provider: "key", kind: "balance", user: "one" };
+  const gateway = "http://localhost:12345";
+  let results = [
+    { ...plan, windows: [{ pool: "Fast", remaining: 81 }, { pool: "Weekly", remaining: 24 }] },
+    { ...credit, balance: "$12.34" }, { ...credit, user: "two", amount: 0, currency: "USD" },
+    { provider: "meter", kind: "balance", balance: { remaining: 18, unit: "credits" } },
+    { provider: "stale", balance: "¥8", stale: true },
+  ];
+  const { ctx } = await harness(t, {
+    config: { relay: { baseURL: gateway } },
+    fetch: async (url) => url === `${gateway}/` ? Response.json(magpieInfo) : quotas(...results),
+  });
+  const prior = ctx.registry.list();
+  assert.deepEqual(prior.filter((s) => s.label === "Magpie · key").map((s) => s.snapshot.remaining).sort(), ["$0.00", "$12.34"]);
+  assert.equal(prior.find((s) => s.label === "Magpie · meter").snapshot.remaining, "18 credits");
+  assert.equal(prior.find((s) => s.label === "Magpie · stale").snapshot.stale, true);
+  results = [{ ...plan, error: { message: "do not expose this" } }, { ...credit, balance: "$5" }, { ...credit, user: "three", error: "error echoing a secret" }];
+  let rows = await ctx.registry.refresh();
+  for (const pool of prior.filter((s) => s.label.startsWith("Magpie · plan"))) {
+    assert.deepEqual(rows.find((s) => s.id === pool.id).snapshot, { ...pool.snapshot, stale: true, error: "Magpie upstream quota unavailable", errorKey: "magpieUpstreamError" });
+  }
+  assert.equal(rows.find((s) => s.snapshot.account === "one").snapshot.remaining, "$5");
+  assert.equal(rows.find((s) => s.snapshot.account === "three").snapshot.status, "error");
+  assert.ok(!rows.some((s) => s.snapshot.account === "two"));
+  assert.doesNotMatch(JSON.stringify(rows), /echoing a secret|do not expose this/);
+  results = [{ ...plan, windows: [{ pool: "Fast", remaining: 90 }] }];
+  rows = await ctx.registry.refresh();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].snapshot.remaining, "90%");
+  assert.equal(rows[0].snapshot.stale, undefined);
+  results = [];
+  assert.deepEqual(await ctx.registry.refresh(), []);
+});
+
+test("Magpie quota 401/403 do not retry and preserve a successful snapshot on refresh failure", async (t) => {
+  const root = "http://192.168.1.50:4321";
+  let status = 401;
+  const { ctx, fetchCalls, env } = await harness(t, {
+    config: { "magpie-test": { baseURL: root, apiKeyEnv: "TEST_MAGPIE_GATEWAY_KEY" } },
+    fetch: async (url) => {
+      if (url === `${root}/`) return Response.json(magpieInfo);
+      assert.equal(url, `${root}/v1/magpie/quotas`);
+      return status === 200 ? quotas({ name: "account", balance: "44 credits" })
+        : Response.json({ error: "test-gateway-key" }, { status });
+    },
+  });
+  assert.equal(ctx.registry.list()[0].snapshot.errorKey, "magpieAuth401");
+  env("TEST_MAGPIE_GATEWAY_KEY", "test-gateway-key");
+  status = 200;
+  const [fresh] = await ctx.registry.refresh();
+  assert.equal(fresh.snapshot.remaining, "44 credits");
+  status = 403;
+  const [stale] = await ctx.registry.refresh();
+  assert.equal(stale.id, fresh.id);
+  assert.deepEqual(stale.snapshot, { ...fresh.snapshot, stale: true, error: "Magpie quota HTTP 403", errorKey: "magpieAuth403" });
+  assert.equal(fetchCalls.length, 4);
+  assert.deepEqual(fetchCalls.map((r) => r.init.headers.authorization), [undefined, undefined, "Bearer test-gateway-key", "Bearer test-gateway-key"]);
+  assert.doesNotMatch(JSON.stringify(stale), /test-gateway-key/);
+});
+
+test("Magpie toggle persists independently and restores unbridged provider rows", async (t) => {
+  const gateway = "http://127.0.0.1:4321";
+  const { ctx, fetchCalls, boot } = await harness(t, {
+    config: { "magpie": { baseURL: `${gateway}/v1` } }, prefs: { bridgeMagpie: false },
+    fetch: async (url) => url === `${gateway}/` ? Response.json(magpieInfo) : quotas({ provider: "one", remaining: 0 }),
+  });
+  assert.equal(fetchCalls.length, 0);
+  assert.deepEqual(ids(ctx), ["provider:magpie"]);
+  const post = (body) => request(ctx, "/prefs", { method: "POST", body });
+  await post({ bridgeMagpie: true, queryProviders: false });
+  await flush();
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(ctx.registry.list()[0].snapshot.remaining, "0");
+  await post({ bridgeMagpie: false, queryProviders: true });
+  await request(ctx, "/refresh", { method: "POST" });
+  assert.deepEqual(ids(ctx), ["provider:magpie"]);
+  assert.equal(fetchCalls.length, 2);
+  ctx.dispose();
+  const restarted = boot();
+  await flush();
+  assert.deepEqual(ids(restarted), ["provider:magpie"]);
+  assert.equal(fetchCalls.length, 2);
+});
+
+test("disabling Magpie aborts an unfinished probe before it can release any credentials", async (t) => {
+  const root = "https://gateway.test/prefix";
+  let resolveProbe;
+  let keyLookups = 0;
+  const { ctx, fetchCalls } = await harness(t, {
+    config: { "magpie-route": { baseURL: `${root}/v1`, apiKeyEnv: "TEST_MAGPIE_GATEWAY_KEY" } },
+    credentials: { resolve: async () => { keyLookups++; return { value: "test-gateway-key" }; } },
+    fetch: async () => new Promise((resolve) => { resolveProbe = resolve; }),
+  });
+  assert.equal(fetchCalls.length, 1);
+  const probe = fetchCalls[0];
+  assert.equal(probe.url, `${root}/`);
+  assert.equal(probe.init.signal.aborted, false);
+  await request(ctx, "/prefs", { method: "POST", body: { bridgeMagpie: false } });
+  assert.equal(probe.init.signal.aborted, true);
+  resolveProbe(Response.json(magpieInfo));
+  await flush();
+  assert.equal(keyLookups, 0);
+  assert.equal(fetchCalls.length, 1);
+  assert.deepEqual(ids(ctx), ["provider:magpie-route"]);
+});
+
+test("malformed Magpie gateway responses keep the last known rows and recover on success", async (t) => {
+  const root = "http://127.0.0.1:4221";
+  let quotaResult = () => quotas({ provider: "account", balance: "$8" });
+  const { ctx } = await harness(t, {
+    config: { local: { baseURL: root } },
+    fetch: async (url) => url === `${root}/` ? Response.json(magpieInfo) : quotaResult(),
+  });
+  const [fresh] = ctx.registry.list();
+  quotaResult = () => Response.json({ data: [null, false] });
+  const [firstStale] = await ctx.registry.refresh();
+  assert.equal(firstStale.id, fresh.id);
+  assert.equal(firstStale.snapshot.errorKey, "magpieInvalidResponse");
+  assert.equal(firstStale.snapshot.remaining, "$8");
+  quotaResult = () => { throw new Error("unsafe gateway message"); };
+  const [secondStale] = await ctx.registry.refresh();
+  assert.equal(secondStale.snapshot.stale, true);
+  assert.equal(secondStale.snapshot.updatedAt, fresh.snapshot.updatedAt);
+  assert.equal(secondStale.snapshot.errorKey, "magpieRequestFailed");
+  assert.doesNotMatch(JSON.stringify(secondStale), /unsafe gateway message/);
+  quotaResult = () => quotas({ provider: "account", balance: "$9" });
+  const [recovered] = await ctx.registry.refresh();
+  assert.equal(recovered.id, fresh.id);
+  assert.equal(recovered.snapshot.remaining, "$9");
+  assert.equal(recovered.snapshot.stale, undefined);
 });
 
 test("Qwen streams pass chunks through, persist local usage, reload, and reset", async (t) => {

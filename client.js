@@ -21,6 +21,12 @@ window.__ModuleLoader__.load({
       refreshInterval: "刷新间隔（秒）", apply: "应用",
       bridges: "数据来源", bridgeFactory: "Factory (Droid) 订阅额度",
       bridgeSubscriptions: "订阅插件用量（Codex / Claude / Grok 等）",
+      bridgeMagpie: "Magpie 网关额度", magpieAccount: "账号",
+      magpieAuth401: "Magpie 网关未接受凭据（HTTP 401）",
+      magpieAuth403: "Magpie 网关拒绝查询额度（HTTP 403）；请检查 Gateway Key 的额度查询权限。",
+      magpieUpstreamError: "Magpie 未能读取此账号的额度。",
+      magpieInvalidResponse: "Magpie 未返回有效的额度数据。",
+      magpieRequestFailed: "无法读取 Magpie 网关额度。",
       queryProviders: "DSH 配置的供应商余额",
       visibility: "显示条目", visible: "显示", hidden: "隐藏",
       saved: "已保存", saveFail: "保存失败", noSources: "暂无可配置的条目",
@@ -39,6 +45,12 @@ window.__ModuleLoader__.load({
       refreshInterval: "Refresh interval (seconds)", apply: "Apply",
       bridges: "Data sources", bridgeFactory: "Factory (Droid) subscription quota",
       bridgeSubscriptions: "Subscription usage (Codex / Claude / Grok …)",
+      bridgeMagpie: "Magpie gateway quota", magpieAccount: "Account",
+      magpieAuth401: "Magpie gateway did not accept the credentials (HTTP 401).",
+      magpieAuth403: "Magpie gateway denied quota access (HTTP 403). Check the Gateway Key's quota permission.",
+      magpieUpstreamError: "Magpie could not read quota for this account.",
+      magpieInvalidResponse: "Magpie did not return valid quota data.",
+      magpieRequestFailed: "Could not read quota from the Magpie gateway.",
       queryProviders: "DSH-configured provider balances",
       visibility: "Visible items", visible: "Show", hidden: "Hide",
       saved: "Saved", saveFail: "Save failed", noSources: "No configurable items",
@@ -281,12 +293,15 @@ window.__ModuleLoader__.load({
 
     function Row({ source, t }) {
       const s = source.snapshot ?? {};
+      const account = s.account ? `${t("magpieAccount")}: ${s.account}` : null;
+      const message = s.errorKey ? t(s.errorKey) || s.error : s.error;
       let value, detail = null;
       if (s.status === "ok") {
         const note = s.stale ? t(s.error ? "quotaRefreshFailed" : "staleQuota") : null;
         const summary = [note, s.detail].filter(Boolean).join(" · ");
-        value = h("span", { className: "pq-value", title: summary || undefined }, s.remaining ?? "—");
-        if (summary) detail = h("div", { className: "pq-detail", title: summary }, summary);
+        const tooltip = [note, s.tooltip || s.detail, account, s.stale && s.errorKey ? message : null].filter(Boolean).join(" · ");
+        value = h("span", { className: "pq-value", title: tooltip || undefined }, s.remaining ?? "—");
+        if (summary) detail = h("div", { className: "pq-detail", title: tooltip }, summary);
       } else if (s.status === "local") {
         const u = s.usage;
         const since = u?.since != null ? new Date(u.since) : null;
@@ -307,7 +322,7 @@ window.__ModuleLoader__.load({
       } else if (s.status === "unsupported") {
         value = h("span", { className: "pq-value pq-muted", title: s.detail ?? "" }, t("unsupported"));
       } else {
-        value = h("span", { className: "pq-value pq-err", title: s.error ?? "" }, t("error"));
+        value = h("span", { className: "pq-value pq-err", title: [message, account].filter(Boolean).join(" · ") }, t("error"));
       }
       const showBar = s.status === "ok" && s.usedPercent != null && Number.isFinite(Number(s.usedPercent));
       return h("div", { className: "pq-row" + (s.status === "local" ? " pq-row-local" : "") },
@@ -592,6 +607,9 @@ window.__ModuleLoader__.load({
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("bridgeSubscriptions")),
             h(Switch, { checked: !!draft.bridgeSubscriptions, onChange: (v) => save({ bridgeSubscriptions: v }), label: t("bridgeSubscriptions") })),
+          h("div", { className: "pq-set-row" },
+            h("span", { className: "pq-k" }, t("bridgeMagpie")),
+            h(Switch, { checked: draft.bridgeMagpie !== false, onChange: (v) => save({ bridgeMagpie: v }), label: t("bridgeMagpie") })),
           h("div", { className: "pq-set-row" },
             h("span", { className: "pq-k" }, t("queryProviders")),
             h(Switch, { checked: !!draft.queryProviders, onChange: (v) => save({ queryProviders: v }), label: t("queryProviders") }))),
