@@ -204,6 +204,21 @@ test("a timed-out subscription keeps the last quota marked stale and the next po
   assert.equal(fresh.remaining, "70%");
 });
 
+test("Codex details show compact windows and remaining quota, keeping the weekly headline", async (t) => {
+  const app = client(t, { rpc: async (_path, method) => method.endsWith(".status")
+    ? { value: { providers: { codex: { accounts: [{ key: "main" }] } } } }
+    : { ok: true, value: { windows: [
+      { kind: "session", usedPercent: 0 }, { kind: "weekly", usedPercent: 25 },
+      { kind: "other", durationMs: 7200000, usedPercent: 100 }, { kind: "other", usedPercent: null },
+    ] } } });
+  app.mount();
+  await flush();
+  const snapshot = panel(app.render()).props.sources[0].snapshot;
+  assert.equal(snapshot.remaining, "75%");
+  assert.equal(snapshot.usedPercent, 25);
+  assert.equal(snapshot.detail, "5h 100% · 7d 75% · 2h 0%");
+});
+
 test("subscription status selects the default account and configured interval replaces default", async (t) => {
   const app = client(t, { refreshSeconds: 23 });
   app.mount();

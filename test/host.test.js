@@ -677,6 +677,22 @@ test("invalid stored counters are sanitized and failed writes retry without brea
   assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {});
 });
 
+test("Factory shows remaining quota for compact windows and ignores missing usage", async (t) => {
+  const standard = { fiveHour: { usedPercent: 0 }, weekly: { usedPercent: 67 }, monthly: { usedPercent: 100 } };
+  const { ctx } = await harness(t, {
+    providers: ["factory/account"],
+    fetch: async () => Response.json({ ok: true, value: { standard } }),
+  });
+  const snapshot = () => ctx.registry.list().find((s) => s.id === "plugin:factory").snapshot;
+  assert.equal(snapshot().remaining, "33%");
+  assert.equal(snapshot().usedPercent, 67);
+  assert.equal(snapshot().detail, "5h 100% · 7d 33% · 1mo 0%");
+  standard.weekly.usedPercent = null;
+  await ctx.registry.refresh("plugin:factory");
+  assert.equal(snapshot().detail, "5h 100% · 1mo 0%");
+  assert.equal(snapshot().remaining, "100%");
+});
+
 test("preferences clamp refresh interval, persist, and toggle owned sources and usage", async (t) => {
   const { ctx, home, intervals, boot } = await harness(t, {
     providers: ["factory/account", "codex/account"],

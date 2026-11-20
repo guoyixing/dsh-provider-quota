@@ -149,12 +149,26 @@ window.__ModuleLoader__.load({
       if (hours < 48) return `${hours}h`;
       return `${Math.round(hours / 24)}d`;
     }
+    function windowLabel({ kind, durationMs }) {
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        for (const [unit, ms] of [["d", 86400000], ["h", 3600000], ["m", 60000], ["s", 1000]]) {
+          if (durationMs % ms === 0) return `${durationMs / ms}${unit}`;
+        }
+      }
+      return ({ session: "5h", weekly: "7d", daily: "1d", monthly: "1mo" })[kind] ?? kind ?? "window";
+    }
     function usageToView(windows) {
-      const usable = windows.filter((w) => w?.usedPercent != null && w.usedPercent !== "" && Number.isFinite(Number(w.usedPercent)));
+      const usable = [];
+      for (const w of windows) {
+        const raw = w?.usedPercent;
+        if (typeof raw !== "number" && !(typeof raw === "string" && raw.trim())) continue;
+        const n = Number(raw);
+        if (Number.isFinite(n)) usable.push({ ...w, usedPercent: Math.min(100, Math.max(0, n)) });
+      }
       if (usable.length === 0) return { status: "unsupported", detail: "no usage window" };
-      const primary = usable.find((w) => w.label === "weekly") ?? usable[0];
-      const used = Math.min(100, Math.max(0, Number(primary.usedPercent)));
-      const parts = usable.map((w) => `${w.label} ${Math.round(Number(w.usedPercent))}%`);
+      const primary = usable.find((w) => w.kind === "weekly") ?? usable[0];
+      const used = primary.usedPercent;
+      const parts = usable.map((w) => `${windowLabel(w)} ${Math.round(100 - w.usedPercent)}%`);
       const reset = fmtReset(primary.resetsAt);
       return { status: "ok", remaining: `${Math.round(100 - used)}%`, usedPercent: used, detail: parts.join(" · ") + (reset ? ` · ↻${reset}` : "") };
     }
@@ -171,11 +185,7 @@ window.__ModuleLoader__.load({
         if (usage.supported === false) return usage.retryAt || usage.stale
           ? { status: "error", error: usage.reason ?? "usage unavailable" }
           : { status: "unsupported", detail: usage.reason ?? "not supported" };
-        const windows = (Array.isArray(usage.windows) ? usage.windows : []).filter(Boolean).map((w) => ({
-          label: w.kind === "session" ? "5h" : w.kind === "weekly" ? "weekly" : (w.kind ?? "window"),
-          usedPercent: w.usedPercent, resetsAt: w.resetsAt,
-        }));
-        const view = usageToView(windows);
+        const view = usageToView(Array.isArray(usage.windows) ? usage.windows : []);
         if (view.status === "ok") {
           view.stale = usage.refreshFailed === true || usage.stale === true || (typeof usage.staleAt === "number" && Date.now() >= usage.staleAt);
           if (usage.refreshFailed === true) view.error = usage.reason ?? "usage refresh failed";

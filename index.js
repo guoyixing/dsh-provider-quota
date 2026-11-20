@@ -90,11 +90,15 @@ function fmtReset(resetsAt) {
 }
 
 function windowsToView(windows) {
-  const usable = (windows ?? []).filter((w) => w && Number.isFinite(Number(w.usedPercent)));
+  const usable = [];
+  for (const w of windows) {
+    const n = quotaNumber(w.usedPercent);
+    if (Number.isFinite(n)) usable.push({ ...w, usedPercent: Math.min(100, Math.max(0, n)) });
+  }
   if (usable.length === 0) return { status: "unsupported", detail: "no usage window" };
-  const primary = usable.find((w) => w.label === "weekly") ?? usable[0];
-  const used = Math.min(100, Math.max(0, Number(primary.usedPercent)));
-  const parts = usable.map((w) => `${w.label} ${Math.round(Number(w.usedPercent))}%`);
+  const primary = usable.find((w) => w.label === "7d") ?? usable[0];
+  const used = primary.usedPercent;
+  const parts = usable.map((w) => `${w.label} ${Math.round(100 - w.usedPercent)}%`);
   const reset = fmtReset(primary.resetsAt);
   return {
     status: "ok",
@@ -674,7 +678,7 @@ export function apply(ctx, config) {
     const std = v.standard ?? {};
     const windows = [];
     const push = (label, w) => { if (w) windows.push({ label, usedPercent: w.usedPercent, resetsAt: w.windowEnd ? Date.parse(w.windowEnd) : undefined }); };
-    push("5h", std.fiveHour); push("weekly", std.weekly); push("monthly", std.monthly);
+    push("5h", std.fiveHour); push("7d", std.weekly); push("1mo", std.monthly);
     const view = windowsToView(windows);
     if (view.status === "ok" && Number(v.extraUsageBalanceCents) > 0) {
       view.detail = `${view.detail ?? ""} · +$${(Number(v.extraUsageBalanceCents) / 100).toFixed(2)}`;
