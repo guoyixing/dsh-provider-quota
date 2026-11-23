@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useRef, useCallback } = React;
 
     const zh = {
-      title: "额度", refresh: "刷新", empty: "暂无额度数据", loading: "加载中…",
+      title: "额度", refresh: "刷新", collapse: "收起", expand: "展开", empty: "暂无额度数据", loading: "加载中…",
       unsupported: "不支持查询", error: "查询失败", open: "查看供应商额度",
       console: "控制台查看", notSignedIn: "未登录", staleQuota: "上次查询结果", quotaRefreshFailed: "刷新失败，显示上次结果",
       settingsTitle: "供应商额度", settingsDesc: "配置额度面板的刷新与显示。",
@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
       resetting: "重置中…", resetSuccess: "统计已重置", resetFail: "重置失败，请重试",
     };
     const en = {
-      title: "Quota", refresh: "Refresh", empty: "No quota data", loading: "Loading…",
+      title: "Quota", refresh: "Refresh", collapse: "Collapse", expand: "Expand", empty: "No quota data", loading: "Loading…",
       unsupported: "Not queryable", error: "Query failed", open: "View provider quota",
       console: "Open console", notSignedIn: "Not signed in", staleQuota: "Last known quota", quotaRefreshFailed: "Refresh failed; last known quota",
       settingsTitle: "Provider quota", settingsDesc: "Configure refresh and visibility of the quota panel.",
@@ -68,14 +68,26 @@ window.__ModuleLoader__.load({
 .pq-root{width:100%;min-width:0;flex:1 1 auto;box-sizing:border-box;}
 .pq-wrap{display:flex;flex-direction:column;gap:2px;padding:2px 0;width:100%;min-width:0;box-sizing:border-box;}
 .pq-head{display:flex;align-items:center;justify-content:space-between;padding:0 6px;gap:6px;}
+.pq-head-btn{display:inline-flex;align-items:center;gap:4px;border:none;border-radius:5px;background:transparent;color:inherit;cursor:pointer;padding:2px 4px;margin-left:-4px;min-width:0;}
+.pq-head-btn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);}
+.pq-head-btn:hover .pq-title,.pq-head-btn:hover .pq-chev{color:var(--dsw-alias-label-primary);}
+.pq-head-count{font-size:10px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;}
 .pq-title{font-size:11px;letter-spacing:.04em;color:var(--dsw-alias-label-tertiary);}
+.pq-chev{flex:none;transition:transform .15s;color:var(--dsw-alias-label-tertiary);}
+.pq-chev-open{transform:rotate(90deg);}
 .pq-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border:none;border-radius:5px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:0;flex:none;}
 .pq-iconbtn:hover{background:var(--dsw-specific-sidebar-nav-item-hover);color:var(--dsw-alias-label-primary);}
 .pq-iconbtn:disabled{opacity:.55;cursor:wait;}
-.pq-rows{display:flex;flex-direction:column;gap:1px;width:100%;max-height:220px;overflow-y:auto;}
+.pq-rows{display:flex;flex-direction:column;gap:1px;width:100%;max-height:280px;overflow-y:auto;}
 .pq-row{display:grid;grid-template-rows:16px 3px 13px;gap:3px;height:48px;flex:0 0 48px;padding:5px 6px;border-radius:6px;width:100%;min-width:0;box-sizing:border-box;overflow:hidden;}
+.pq-row-collapsible,.pq-row-toggle{cursor:pointer;user-select:none;}
+.pq-row.pq-row-pools{display:flex;flex-direction:column;gap:4px;height:auto;flex:0 0 auto;}
 .pq-row:hover{background:var(--dsw-specific-sidebar-nav-item-hover);}
+.pq-pools{display:flex;flex-direction:column;gap:5px;width:100%;min-width:0;}
+.pq-pool{display:flex;flex-direction:column;gap:2px;width:100%;min-width:0;padding-left:6px;border-left:2px solid var(--dsw-alias-border-l1);box-sizing:border-box;}
+.pq-pool-label{font-size:11px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;}
 .pq-line{grid-row:1;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;width:100%;line-height:16px;overflow:hidden;}
+.pq-label-wrap{display:inline-flex;align-items:center;gap:4px;min-width:0;flex:1 1 auto;overflow:hidden;}
 .pq-label{font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;}
 .pq-value{font-size:12px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums;flex:none;}
 .pq-value.pq-muted{color:var(--dsw-alias-label-tertiary);font-size:11px;}
@@ -127,6 +139,14 @@ window.__ModuleLoader__.load({
       return h("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", "aria-hidden": true },
         h("path", { d: "M20 12a8 8 0 1 1-2.34-5.66", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" }),
         h("path", { d: "M20 4v4h-4", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round" }));
+    }
+    function ChevronIcon({ open, size = 10 }) {
+      return h("svg", {
+        width: size, height: size, viewBox: "0 0 12 12", fill: "none", "aria-hidden": true,
+        className: "pq-chev" + (open ? " pq-chev-open" : ""),
+      }, h("path", {
+        d: "M4.2 2.5L8 6L4.2 9.5", stroke: "currentColor", strokeWidth: 1.6, strokeLinecap: "round", strokeLinejoin: "round",
+      }));
     }
 
     function barClass(pct) {
@@ -291,8 +311,19 @@ window.__ModuleLoader__.load({
       };
     }
     const PREFS_EVENT = "provider-quota:changed";
+    const PANEL_COLLAPSED_KEY = "provider-quota:panel-collapsed";
+    const EXPANDED_POOLS_KEY = "provider-quota:expanded-pools";
     let preferenceWrites = Promise.resolve(); // Keep saves ordered across Settings remounts.
     const isHidden = (hidden, id) => hidden != null && Object.hasOwn(hidden, id) && !!hidden[id];
+    function readStorage(key, fallback) {
+      try {
+        const raw = window.localStorage?.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch { return fallback; }
+    }
+    function writeStorage(key, value) {
+      try { window.localStorage?.setItem(key, JSON.stringify(value)); } catch {}
+    }
 
     async function readSourceList(response) {
       if (!response.ok) throw new Error("quota request failed");
@@ -301,10 +332,65 @@ window.__ModuleLoader__.load({
       return data.value;
     }
 
-    function Row({ source, t }) {
+    function Row({ source, expanded = false, onToggle, t }) {
       const s = source.snapshot ?? {};
       const account = s.account ? `${t("magpieAccount")}: ${s.account}` : null;
       const message = s.errorKey ? t(s.errorKey) || s.error : s.error;
+      const pools = s.status === "ok" && Array.isArray(s.pools) && s.pools.length > 1 ? s.pools : null;
+      if (pools) {
+        const note = s.stale ? t(s.error ? "quotaRefreshFailed" : "staleQuota") : null;
+        const headerTooltip = [note, s.tooltip || s.detail, account, s.stale && s.errorKey ? message : null].filter(Boolean).join(" · ");
+        const onKey = onToggle ? (e) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); }
+        } : undefined;
+        if (!expanded) {
+          const compactPools = s.detail || [pools.map((p) => [p.label, p.remaining].filter(Boolean).join(" ")).join(" · "), s.balance].filter(Boolean).join(" · ");
+          const summary = [note, compactPools].filter(Boolean).join(" · ");
+          const showPoolSummaryBar = s.usedPercent != null && Number.isFinite(Number(s.usedPercent));
+          return h("div", {
+            className: "pq-row pq-row-collapsible",
+            role: onToggle ? "button" : undefined,
+            tabIndex: onToggle ? 0 : undefined,
+            "aria-expanded": false,
+            onClick: onToggle,
+            onKeyDown: onKey,
+          },
+            h("div", { className: "pq-line" },
+              h("span", { className: "pq-label-wrap" },
+                h(ChevronIcon, { open: false }),
+                h("span", { className: "pq-label", title: headerTooltip || source.label }, source.label)),
+              h("span", { className: "pq-value", title: headerTooltip || undefined }, s.remaining ?? "—")),
+            showPoolSummaryBar && h("div", { className: "pq-bar" },
+              h("div", { className: barClass(Number(s.usedPercent)), style: { width: `${Math.min(100, Math.max(0, Number(s.usedPercent)))}%` } })),
+            summary && h("div", { className: "pq-detail", title: headerTooltip || undefined }, summary));
+        }
+        const headerRight = [note, s.balance].filter(Boolean).join(" · ");
+        return h("div", { className: "pq-row pq-row-pools" },
+          h("div", {
+            className: "pq-line pq-row-toggle",
+            role: onToggle ? "button" : undefined,
+            tabIndex: onToggle ? 0 : undefined,
+            "aria-expanded": true,
+            onClick: onToggle,
+            onKeyDown: onKey,
+          },
+            h("span", { className: "pq-label-wrap" },
+              h(ChevronIcon, { open: true }),
+              h("span", { className: "pq-label", title: headerTooltip || source.label }, source.label)),
+            headerRight ? h("span", { className: "pq-value" + (s.balance ? "" : " pq-muted"), title: headerTooltip || undefined }, headerRight) : null),
+          h("div", { className: "pq-pools" },
+            pools.map((pool, i) => {
+              const poolTooltip = [note, pool.label, pool.tooltip || pool.detail, account, s.stale && s.errorKey ? message : null].filter(Boolean).join(" · ");
+              const showPoolBar = pool.usedPercent != null && Number.isFinite(Number(pool.usedPercent));
+              return h("div", { key: pool.label || i, className: "pq-pool" },
+                h("div", { className: "pq-line" },
+                  h("span", { className: "pq-pool-label", title: poolTooltip || pool.label }, pool.label),
+                  h("span", { className: "pq-value", title: poolTooltip || undefined }, pool.remaining ?? "—")),
+                showPoolBar && h("div", { className: "pq-bar" },
+                  h("div", { className: barClass(Number(pool.usedPercent)), style: { width: `${Math.min(100, Math.max(0, Number(pool.usedPercent)))}%` } })),
+                pool.detail && pool.detail !== pool.remaining && h("div", { className: "pq-detail", title: poolTooltip || undefined }, pool.detail));
+            })));
+      }
       let value, detail = null;
       if (s.status === "ok") {
         const note = s.stale ? t(s.error ? "quotaRefreshFailed" : "staleQuota") : null;
@@ -344,15 +430,30 @@ window.__ModuleLoader__.load({
         detail);
     }
 
-    function Panel({ sources, loading, refreshing, refreshFailed, t, onRefresh }) {
+    function Panel({ sources, loading, refreshing, refreshFailed, collapsed = false, expandedPools = {}, t, onRefresh, onToggleCollapse, onTogglePool }) {
+      const titleNode = h(React.Fragment, null,
+        onToggleCollapse && h(ChevronIcon, { open: !collapsed }),
+        h("span", { className: "pq-title" }, t("title")),
+        collapsed && sources.length > 0 && h("span", { className: "pq-head-count" }, `(${sources.length})`));
       return h("div", { className: "pq-wrap" },
         h("div", { className: "pq-head" },
-          h("span", { className: "pq-title" }, t("title")),
+          onToggleCollapse
+            ? h("button", {
+                type: "button", className: "pq-head-btn",
+                title: t(collapsed ? "expand" : "collapse"),
+                "aria-label": `${t("title")} · ${t(collapsed ? "expand" : "collapse")}`,
+                "aria-expanded": !collapsed,
+                onClick: onToggleCollapse,
+              }, titleNode)
+            : h("span", { className: "pq-title" }, t("title")),
           h("button", { type: "button", className: "pq-iconbtn", title: t(refreshing ? "loading" : "refresh"), "aria-label": t("refresh"), "aria-busy": refreshing, disabled: refreshing, onClick: onRefresh }, h(RefreshIcon, null))),
-        refreshFailed && h("div", { className: "pq-empty pq-err", role: "status" }, t(sources.length ? "quotaRefreshFailed" : "error")),
-        loading && sources.length === 0 ? h("div", { className: "pq-empty" }, t("loading"))
+        !collapsed && refreshFailed && h("div", { className: "pq-empty pq-err", role: "status" }, t(sources.length ? "quotaRefreshFailed" : "error")),
+        !collapsed && (loading && sources.length === 0 ? h("div", { className: "pq-empty" }, t("loading"))
           : sources.length === 0 ? (!refreshFailed && h("div", { className: "pq-empty" }, t("empty")))
-          : h("div", { className: "pq-rows" }, sources.map((s) => h(Row, { key: s.id, source: s, t }))));
+          : h("div", { className: "pq-rows" }, sources.map((s) => h(Row, {
+              key: s.id, source: s, expanded: Boolean(expandedPools?.[s.id]),
+              onToggle: onTogglePool ? () => onTogglePool(s.id) : undefined, t,
+            })))));
     }
 
     function QuotaWidget({ wide, t, getRpc }) {
@@ -361,11 +462,33 @@ window.__ModuleLoader__.load({
       const [refreshing, setRefreshing] = useState(false);
       const [refreshFailed, setRefreshFailed] = useState(false);
       const [refreshSeconds, setRefreshSeconds] = useState(60);
+      const [collapsed, setCollapsed] = useState(() => Boolean(readStorage(PANEL_COLLAPSED_KEY, false)));
+      const [expandedPools, setExpandedPools] = useState(() => {
+        const saved = readStorage(EXPANDED_POOLS_KEY, {});
+        return saved && typeof saved === "object" && !Array.isArray(saved) ? saved : {};
+      });
       const [open, setOpen] = useState(false);
       const [pos, setPos] = useState({ top: 0, left: 0 });
       const btnRef = useRef(null);
       const popRef = useRef(null);
       const session = useRef(null);
+
+      const onToggleCollapse = useCallback(() => {
+        setCollapsed((prev) => {
+          const next = !prev;
+          writeStorage(PANEL_COLLAPSED_KEY, next);
+          return next;
+        });
+      }, []);
+
+      const onTogglePool = useCallback((id) => {
+        setExpandedPools((prev) => {
+          const next = { ...prev, [id]: !prev[id] };
+          if (!next[id]) delete next[id];
+          writeStorage(EXPANDED_POOLS_KEY, next);
+          return next;
+        });
+      }, []);
 
       const publishList = useCallback((current) => {
         setRefreshSeconds(Math.min(3600, Math.max(5, Number(current.prefs?.refreshSeconds) || 60)));
@@ -469,12 +592,15 @@ window.__ModuleLoader__.load({
         setOpen((v) => !v);
       };
 
-      if (wide) return h("div", { className: "pq-root" }, h(Panel, { sources, loading, refreshing, refreshFailed, t, onRefresh }));
+      if (wide) return h("div", { className: "pq-root" }, h(Panel, {
+        sources, loading, refreshing, refreshFailed, collapsed, expandedPools,
+        t, onRefresh, onToggleCollapse, onTogglePool,
+      }));
       return h(React.Fragment, null,
         h("button", { type: "button", ref: btnRef, className: "pq-railbtn", title: t("open"), "aria-label": t("open"), onClick: openPop }, h(GaugeIcon, { size: 18 })),
         open && ReactDOM.createPortal(
           h("div", { className: "pq-pop", ref: popRef, style: { top: pos.top, left: pos.left }, role: "dialog", "aria-label": t("title") },
-            h(Panel, { sources, loading, refreshing, refreshFailed, t, onRefresh })),
+            h(Panel, { sources, loading, refreshing, refreshFailed, expandedPools, t, onRefresh, onTogglePool })),
           document.body));
     }
 

@@ -547,28 +547,62 @@ function itemSwitch(app, label) {
   return nodes(component.type(component.props)).find((node) => node.props.role === "switch");
 }
 
-test("Magpie rows show localized stale details and hide each pool independently", async (t) => {
+test("Magpie rows default to a collapsed summary, expand to show pool bars on click, and support panel-level collapse", async (t) => {
   for (const locale of ["en", "zh"]) {
     await t.test(locale, async (t) => {
-      const gemini = { id: "plugin:magpie:gateway:account:gemini", label: "Magpie · agy-cli (Gemini)", snapshot: {
+      const antigravity = { id: "plugin:magpie:gateway:account", label: "Antigravity", snapshot: {
         status: "ok", remaining: "23%", usedPercent: 77, account: "me@example.test", stale: true,
-        detail: "5h 23% · 7d 99% · ↻2h", tooltip: "5h 23% ↻2026-11-19 11:30Z · 7d 99% ↻2026-11-26 11:30Z", error: "Forbidden", errorKey: "magpieAuth403",
+        detail: "7d 99% · 5h 23% · O & A 100% · Argon 100%",
+        tooltip: "Gemini 5h 23% ↻2026-11-19 11:30Z · 7d 99% ↻2026-11-26 11:30Z · O & A 7d 100% ↻2026-11-26 11:30Z · Argon 7d 100% ↻2026-11-26 11:30Z",
+        error: "Forbidden", errorKey: "magpieAuth403",
+        pools: [
+          { label: "Gemini", remaining: "23%", usedPercent: 77, detail: "5h 23% · 7d 99% · ↻2h", tooltip: "5h 23% ↻2026-11-19 11:30Z · 7d 99% ↻2026-11-26 11:30Z" },
+          { label: "O & A", remaining: "100%", usedPercent: 0, detail: "7d 100% · 5h 100% · ↻7d", tooltip: "7d 100% ↻2026-11-26 11:30Z · 5h 100% ↻2026-11-19 16:30Z" },
+          { label: "Argon", remaining: "100%", usedPercent: 0, detail: "7d 100% · ↻7d", tooltip: "7d 100% ↻2026-11-26 11:30Z" },
+        ],
       } };
-      const other = { id: "plugin:magpie:gateway:account:other", label: "Magpie · agy-cli (Claude)", snapshot: { status: "error", errorKey: "magpieUpstreamError" } };
-      const app = client(t, { locale, sources: [gemini, other] });
+      const other = { id: "plugin:magpie:gateway:other", label: "Claude", snapshot: { status: "error", errorKey: "magpieUpstreamError" } };
+      const app = client(t, { locale, sources: [antigravity, other] });
       app.mount();
       await flush();
-      const [first, second] = rows(app);
-      assert.match(text(first), /23%/);
-      const detailNode = nodes(first).find((node) => node.props.className === "pq-detail");
+      let [first, second] = rows(app);
+      assert.equal(first.props.className, "pq-row pq-row-collapsible");
+      assert.equal(first.props["aria-expanded"], false);
+      assert.equal(nodes(first).filter((node) => node.props.className === "pq-bar").length, 1);
+      const collapsedDetail = nodes(first).find((node) => node.props.className === "pq-detail");
+      assert.match(text(collapsedDetail), /7d 99% · 5h 23% · O & A 100% · Argon 100%/);
+      first.props.onClick();
+      [first, second] = rows(app);
+      assert.equal(first.props.className, "pq-row pq-row-pools");
+      const poolNodes = nodes(first).filter((node) => node.props.className === "pq-pool");
+      assert.equal(poolNodes.length, 3);
+      assert.equal(nodes(first).filter((node) => node.props.className === "pq-bar").length, 3);
+      assert.match(text(poolNodes[0]), /Gemini.*23%/);
+      assert.match(text(poolNodes[1]), /O & A.*100%/);
+      assert.match(text(poolNodes[2]), /Argon.*100%/);
+      const detailNode = nodes(poolNodes[0]).find((node) => node.props.className === "pq-detail");
       assert.doesNotMatch(text(detailNode), /me@example\.test/);
       assert.match(text(detailNode), /5h 23% · 7d 99% · ↻2h/);
       const tooltip = detailNode.props.title;
       assert.match(tooltip, /5h 23% ↻2026-11-19 11:30Z.*7d 99% ↻2026-11-26 11:30Z/);
       assert.match(tooltip, locale === "zh" ? /刷新失败.*账号: me@example.test.*查询额度（HTTP 403）/ : /Refresh failed.*Account: me@example.test.*denied quota access \(HTTP 403\)/);
+      const toggleHeader = nodes(first).find((node) => node.props.className === "pq-line pq-row-toggle");
+      toggleHeader.props.onClick();
+      [first] = rows(app);
+      assert.equal(first.props.className, "pq-row pq-row-collapsible");
+      const panelView = panel(app.render());
+      const headBtn = nodes(panelView.type(panelView.props)).find((node) => node.props.className === "pq-head-btn");
+      assert.equal(headBtn.props["aria-expanded"], true);
+      headBtn.props.onClick();
+      assert.equal(rows(app).length, 0);
+      const collapsedPanel = panel(app.render());
+      const collapsedTree = collapsedPanel.type(collapsedPanel.props);
+      assert.match(text(collapsedTree), /\(2\)/);
+      nodes(collapsedTree).find((node) => node.props.className === "pq-head-btn").props.onClick();
+      assert.equal(rows(app).length, 2);
       const failure = nodes(second).find((node) => node.props.className === "pq-value pq-err");
       assert.match(failure.props.title, locale === "zh" ? /未能读取此账号/ : /could not read quota/);
-      app.state.prefs.hidden = { [gemini.id]: true };
+      app.state.prefs.hidden = { [antigravity.id]: true };
       app.changed(app.state.prefs);
       await flush();
       assert.deepEqual(Array.from(panel(app.render()).props.sources, (s) => s.id), [other.id]);

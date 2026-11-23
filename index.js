@@ -189,11 +189,33 @@ function staleView(snapshot, { error, errorKey }) {
   return { ...snapshot, stale: true, error, ...(errorKey ? { errorKey } : {}) };
 }
 
+function magpieShortName(name, provider, account) {
+  const raw = name || provider || account || "—";
+  const stripped = (name || provider)
+    .replace(/^magpie\s*[·•\-—:/|]+\s*/i, "")
+    .replace(/(?:\s*\([^)]*\))+\s*$/, "")
+    .trim();
+  return stripped || raw;
+}
+
+function magpiePoolLabel(pool) {
+  const clean = quotaText(pool);
+  if (/^claude\s*&\s*gpt$/i.test(clean)) return "O & A";
+  if (/^gemini\s+4\s+argon$/i.test(clean)) return "Argon";
+  return clean;
+}
+
+function magpiePoolRank(label) {
+  if (/^gemini$/i.test(label)) return 0;
+  if (label === "O & A") return 1;
+  if (label === "Argon") return 2;
+  return 3;
+}
+
 function magpieRows(id, items, previous) {
   const priorByEntry = new Map();
   for (const row of previous ?? []) {
-    if (!priorByEntry.has(row.entryId)) priorByEntry.set(row.entryId, []);
-    priorByEntry.get(row.entryId).push(row);
+    if (row.snapshot?.status === "ok") priorByEntry.set(row.entryId, row);
   }
   const rows = new Map();
   function put(row) {
@@ -210,54 +232,109 @@ function magpieRows(id, items, previous) {
     const kind = quotaText(item.kind);
     const upstreamId = quotaText(item.accountId) || quotaText(item.id);
     const entryId = magpieId(provider, kind, ...(upstreamId ? ["id", upstreamId] : ["name", name, account]));
-    const label = `Magpie · ${name || provider || account || "—"}`;
+    const label = magpieShortName(name, provider, account);
     const error = item.error || item.refreshFailed === true ? magpieError("magpieUpstreamError", "Magpie upstream quota unavailable") : null;
-    const prior = (priorByEntry.get(entryId) ?? []).filter((row) => row.snapshot.status === "ok");
-    if (error && prior.length) {
-      for (const row of prior) put({ ...row, snapshot: staleView(row.snapshot, error) });
+    const prior = priorByEntry.get(entryId);
+    if (error && prior) {
+      put({ ...prior, label, snapshot: staleView(prior.snapshot, error) });
       continue;
     }
-    function add(pool, snapshot) {
+    function add(snapshot) {
       put({
-        id: `${id}:${entryId}:${magpieId(pool)}`, entryId, label: label + (pool ? ` (${pool})` : ""),
+        id: `${id}:${entryId}`, entryId, label,
         snapshot: { ...snapshot, ...(account ? { account } : {}), updatedAt: Date.now() },
       });
     }
     const groups = new Map();
     for (const window of Array.isArray(item.windows) ? item.windows : []) {
-      const pool = quotaText(window?.pool);
-      const view = magpieWindow(window, pool);
+      const rawPool = quotaText(window?.pool);
+      const view = magpieWindow(window, rawPool);
       if (!view) continue;
+      const pool = magpiePoolLabel(rawPool);
       if (!groups.has(pool)) groups.set(pool, []);
       groups.get(pool).push(view);
     }
     const balance = magpieBalance(item);
     const mark = (snapshot) => error ? staleView(snapshot, error) : item.stale === true ? { ...snapshot, stale: true } : snapshot;
-    for (const [pool, windows] of groups) {
-      const primary = windows.reduce((best, w) => {
-        if (w.left !== best.left) return w.left < best.left ? w : best;
-        if (w.resetsAt !== null && (best.resetsAt === null || w.resetsAt < best.resetsAt)) return w;
+    if (groups.size > 0) {
+      const poolViews = [...groups.entries()]
+        .sort(([a], [b]) => magpiePoolRank(a) - magpiePoolRank(b) || a.localeCompare(b))
+        .map(([pool, windows]) => {
+          const primary = windows.reduce((best, w) => {
+            if (w.left !== best.left) return w.left < best.left ? w : best;
+            if (w.resetsAt !== null && (best.resetsAt === null || w.resetsAt < best.resetsAt)) return w;
+            return best;
+          }, windows[0]);
+          const windowParts = windows.map((w) => [w.label, `${Math.round(w.left)}%`].filter(Boolean).join(" "));
+          const windowsText = windowParts.join(" · ");
+          const parts = [...windowParts];
+          const reset = fmtReset(primary.resetsAt);
+          if (reset) parts.push(`↻${reset}`);
+          const full = windows.map((w) => [w.label, `${Math.round(w.left)}%`, w.resetUtc && `↻${w.resetUtc}`].filter(Boolean).join(" "));
+          const detail = parts.join(" · ");
+          const tooltip = full.join(" · ");
+          return {
+            pool, left: primary.left, resetsAt: primary.resetsAt,
+            remaining: `${Math.round(primary.left)}%`, usedPercent: 100 - primary.left,
+            windowsText, detail, ...(tooltip && tooltip !== detail ? { tooltip } : {}),
+          };
+        });
+      const primary = poolViews.find((p) => /^gemini$/i.test(p.pool)) ?? poolViews.reduce((best, p) => {
+        if (p.left !== best.left) return p.left < best.left ? p : best;
+        if (p.resetsAt !== null && (best.resetsAt === null || p.resetsAt < best.resetsAt)) return p;
         return best;
-      }, windows[0]);
-      const parts = windows.map((w) => [w.label, `${Math.round(w.left)}%`].filter(Boolean).join(" "));
+      }, poolViews[0]);
+      const hasPools = poolViews.length > 1 || Boolean(poolViews[0].pool);
+      const pools = hasPools ? poolViews.map(({ pool, remaining, usedPercent, detail, tooltip }) => ({
+        label: pool || "Default", remaining, usedPercent, detail, ...(tooltip ? { tooltip } : {}),
+      })) : undefined;
+      const parts = poolViews.length > 1
+        ? [primary.windowsText, ...poolViews.filter((p) => p !== primary).map((p) => [p.pool, p.remaining].filter(Boolean).join(" "))]
+        : hasPools
+          ? [[poolViews[0].pool, poolViews[0].detail].filter(Boolean).join(" ")]
+          : [poolViews[0].detail];
       if (balance !== null) parts.push(balance);
-      const reset = fmtReset(primary.resetsAt);
-      if (reset) parts.push(`↻${reset}`);
-      const full = windows.map((w) => [w.label, `${Math.round(w.left)}%`, w.resetUtc && `↻${w.resetUtc}`].filter(Boolean).join(" "));
+      const full = hasPools
+        ? poolViews.map((p) => [p.pool, p.tooltip || p.detail].filter(Boolean).join(" "))
+        : [poolViews[0].tooltip || poolViews[0].detail];
       if (balance !== null) full.push(balance);
-      const detail = parts.join(" · ");
-      const tooltip = full.join(" · ");
-      add(pool, mark({
-        status: "ok", remaining: `${Math.round(primary.left)}%`, usedPercent: 100 - primary.left,
+      const detail = parts.filter(Boolean).join(" · ");
+      const tooltip = full.filter(Boolean).join(" · ");
+      add(mark({
+        status: "ok", remaining: primary.remaining, usedPercent: primary.usedPercent,
         detail, ...(tooltip && tooltip !== detail ? { tooltip } : {}),
+        ...(pools ? { pools } : {}),
+        ...(balance !== null ? { balance } : {}),
       }));
-    }
-    if (groups.size === 0) {
-      if (balance !== null) add("", mark({ status: "ok", remaining: balance, usedPercent: null }));
-      else add("", error ?? magpieError("magpieInvalidResponse", "Magpie quota has no usable data"));
+    } else if (balance !== null) {
+      add(mark({ status: "ok", remaining: balance, usedPercent: null }));
+    } else {
+      add(error ?? magpieError("magpieInvalidResponse", "Magpie quota has no usable data"));
     }
   }
-  return [...rows.values()];
+  const result = [...rows.values()];
+  const byLabel = new Map();
+  for (const row of result) {
+    if (!byLabel.has(row.label)) byLabel.set(row.label, []);
+    byLabel.get(row.label).push(row);
+  }
+  for (const [label, group] of byLabel) {
+    if (group.length < 2) continue;
+    const shortCounts = new Map();
+    for (const row of group) {
+      const account = row.snapshot.account;
+      const short = account ? account.split("@")[0] || account : "";
+      if (short) shortCounts.set(short, (shortCounts.get(short) ?? 0) + 1);
+    }
+    for (const row of group) {
+      const account = row.snapshot.account;
+      if (!account || account === label) continue;
+      const short = account.split("@")[0] || account;
+      const tag = shortCounts.get(short) === 1 ? short : account;
+      row.label = `${label} (${tag})`;
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

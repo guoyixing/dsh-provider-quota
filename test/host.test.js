@@ -354,9 +354,9 @@ test("Magpie requires both discovery markers and caches negative probes", async 
   assert.ok(ctx.registry.list().every((s) => s.snapshot.status === "unsupported"));
 });
 
-test("Magpie groups real subscription windows and retains stable per-pool visibility", async (t) => {
+test("Magpie groups real subscription windows under one simplified channel title per account", async (t) => {
   const gateway = "https://example.test";
-  const item = { provider: "agy-cli", name: "agy-cli", kind: "subscription", user: "example@example.test", readAt: "2026-11-19T18:35:25.633812+08:00", windows: [
+  const item = { provider: "agy-cli", name: "Antigravity (local agy CLI)", kind: "subscription", user: "example@example.test", readAt: "2026-11-19T18:35:25.633812+08:00", windows: [
     { name: "Gemini · 7 days", used: 1.66639, remaining: 98.33361, resetsAt: "2026-11-26T10:24:28Z", pool: "Gemini", holdsWhy: "low" },
     { name: "Gemini · 5 hours", used: 3.33236, remaining: 96.66764, resetsAt: "2026-11-19T15:24:28Z", pool: "Gemini", holdsWhy: "low" },
     { name: "Claude & GPT · Weekly", used: 0, remaining: 100, resetsAt: "2026-11-26T10:35:27Z", pool: "Claude & GPT" },
@@ -373,23 +373,34 @@ test("Magpie groups real subscription windows and retains stable per-pool visibi
   });
   const start = ctx.registry.list();
   const byLabel = new Map(start.map((s) => [s.label, s]));
-  const [claude, gemini, argon, plan] = ["agy-cli (Claude & GPT)", "agy-cli (Gemini)", "agy-cli (Gemini 4 Argon)", "plan"].map((label) => byLabel.get(`Magpie · ${label}`));
-  assert.equal(start.length, 4);
-  assert.deepEqual([claude, gemini, argon, plan].map((s) => s.snapshot.remaining), ["100%", "97%", "100%", "50%"]);
-  assert.ok(Math.abs(gemini.snapshot.usedPercent - 3.33236) < 1e-9);
-  assert.equal(gemini.snapshot.account, item.user);
-  assert.match(gemini.snapshot.detail, /^7d 98% · 5h 97%( · ↻\d+[mhd])?$/);
-  assert.match(gemini.snapshot.tooltip, /^7d 98% ↻2026-11-26 10:24Z · 5h 97% ↻2026-11-19 15:24Z$/);
-  assert.match(claude.snapshot.detail, /^7d 100% · 5h 100%( · ↻\d+[mhd])?$/);
-  assert.match(argon.snapshot.detail, /^7d 100%( · ↻\d+[mhd])?$/);
+  const [antigravity, plan] = ["Antigravity", "plan"].map((label) => byLabel.get(label));
+  assert.equal(start.length, 2);
+  assert.deepEqual([antigravity, plan].map((s) => s.snapshot.remaining), ["97%", "50%"]);
+  assert.ok(Math.abs(antigravity.snapshot.usedPercent - 3.33236) < 1e-9);
+  assert.equal(antigravity.snapshot.account, item.user);
+  assert.equal(antigravity.snapshot.detail, "7d 98% · 5h 97% · O & A 100% · Argon 100%");
+  assert.equal(antigravity.snapshot.pools.length, 3);
+  const [gemini, claude, argon] = antigravity.snapshot.pools;
+  assert.deepEqual([gemini.label, claude.label, argon.label], ["Gemini", "O & A", "Argon"]);
+  assert.deepEqual([gemini.remaining, claude.remaining, argon.remaining], ["97%", "100%", "100%"]);
+  assert.ok(Math.abs(gemini.usedPercent - 3.33236) < 1e-9);
+  assert.match(gemini.detail, /^7d 98% · 5h 97%( · ↻\d+[mhd])?$/);
+  assert.match(gemini.tooltip, /^7d 98% ↻2026-11-26 10:24Z · 5h 97% ↻2026-11-19 15:24Z$/);
+  assert.match(claude.detail, /^7d 100% · 5h 100%( · ↻\d+[mhd])?$/);
+  assert.match(argon.detail, /^7d 100%( · ↻\d+[mhd])?$/);
   assert.equal(plan.snapshot.detail, "valid used 75% · shorter 50%");
-  assert.ok(!gemini.id.includes(item.user));
-  await request(ctx, "/prefs", { method: "POST", body: { visibility: { id: gemini.id, visible: false } } });
+  assert.equal(plan.snapshot.pools, undefined);
+  assert.ok(!antigravity.id.includes(item.user));
+  await request(ctx, "/prefs", { method: "POST", body: { visibility: { id: antigravity.id, visible: false } } });
   data = [unpooled, { ...item, windows: item.windows.toReversed() }];
   state.config = { "magpie-rename": { baseURL: `${gateway}/v1/` } };
   const refreshed = (await request(ctx, "/refresh", { method: "POST" })).body.value;
   assert.deepEqual(refreshed.sources.map((s) => s.id), start.map((s) => s.id));
-  assert.deepEqual(refreshed.prefs.hidden, { [gemini.id]: true });
+  assert.deepEqual(refreshed.sources.find((s) => s.id === antigravity.id).snapshot.pools.map((p) => p.label), ["Gemini", "O & A", "Argon"]);
+  assert.deepEqual(refreshed.prefs.hidden, { [antigravity.id]: true });
+  data = [item, { ...item, user: "second@example.test" }];
+  const multi = (await request(ctx, "/refresh", { method: "POST" })).body.value;
+  assert.deepEqual(multi.sources.map((s) => s.label), ["Antigravity (example)", "Antigravity (second)"]);
   state.config = {};
   ctx.emit("llm/adapters-updated");
   assert.deepEqual(ids(ctx), []);
@@ -410,14 +421,13 @@ test("Magpie balances and per-account failures keep only matching last known quo
     fetch: async (url) => url === `${gateway}/` ? Response.json(magpieInfo) : quotas(...results),
   });
   const prior = ctx.registry.list();
-  assert.deepEqual(prior.filter((s) => s.label === "Magpie · key").map((s) => s.snapshot.remaining).sort(), ["$0.00", "$12.34"]);
-  assert.equal(prior.find((s) => s.label === "Magpie · meter").snapshot.remaining, "18 credits");
-  assert.equal(prior.find((s) => s.label === "Magpie · stale").snapshot.stale, true);
+  assert.deepEqual(prior.filter((s) => s.label.startsWith("key (")).map((s) => `${s.label}:${s.snapshot.remaining}`).sort(), ["key (one):$12.34", "key (two):$0.00"]);
+  assert.equal(prior.find((s) => s.label === "meter").snapshot.remaining, "18 credits");
+  assert.equal(prior.find((s) => s.label === "stale").snapshot.stale, true);
   results = [{ ...plan, error: { message: "do not expose this" } }, { ...credit, balance: "$5" }, { ...credit, user: "three", error: "error echoing a secret" }];
   let rows = await ctx.registry.refresh();
-  for (const pool of prior.filter((s) => s.label.startsWith("Magpie · plan"))) {
-    assert.deepEqual(rows.find((s) => s.id === pool.id).snapshot, { ...pool.snapshot, stale: true, error: "Magpie upstream quota unavailable", errorKey: "magpieUpstreamError" });
-  }
+  const priorPlan = prior.find((s) => s.label === "plan");
+  assert.deepEqual(rows.find((s) => s.id === priorPlan.id).snapshot, { ...priorPlan.snapshot, stale: true, error: "Magpie upstream quota unavailable", errorKey: "magpieUpstreamError" });
   assert.equal(rows.find((s) => s.snapshot.account === "one").snapshot.remaining, "$5");
   assert.equal(rows.find((s) => s.snapshot.account === "three").snapshot.status, "error");
   assert.ok(!rows.some((s) => s.snapshot.account === "two"));
